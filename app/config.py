@@ -20,12 +20,50 @@ FORMATIONS = {
 FORMATION_NAME_TO_CODE = {v: k for k, v in FORMATIONS.items()}
 
 # ── League ID → name (BSD events list returns league_id only) ─────────────────
-LEAGUE_NAMES = {
-    17:"Premier League", 8:"La Liga", 5:"Bundesliga", 11:"Serie A",
-    4:"Ligue 1", 2:"Champions League", 3:"Europa League",
-    848:"Conference League", 88:"Eredivisie", 94:"Primeira Liga",
-    39:"Scottish Premiership", 144:"Belgian Pro League",
-    203:"Süper Lig", 197:"Austrian Bundesliga",
+LEAGUE_WEIGHTS: dict[str, float] = {
+    # England (Premier League, Championship)
+    "ENG": 1.00,
+    # Spain (La Liga)
+    "ESP": 0.97,
+    # Germany (Bundesliga)
+    "GER": 0.95,
+    # Italy (Serie A)
+    "ITA": 0.94,
+    # France (Ligue 1)
+    "FRA": 0.91,
+    # Portugal (Primeira Liga)
+    "POR": 0.88,
+    # Netherlands (Eredivisie)
+    "NED": 0.87,
+    # Belgium (Jupiler Pro League)
+    "BEL": 0.85,
+    # Turkey (Süper Lig)
+    "TUR": 0.84,
+    # Russia / Ukraine / Greece
+    "RUS": 0.82,
+    "UKR": 0.82,
+    "GRE": 0.81,
+    # Scotland, Czech Republic, Austria
+    "SCO": 0.80,
+    "CZE": 0.80,
+    "AUT": 0.79,
+    # Brazil (Brasileirão)
+    "BRA": 0.84,
+    # Argentina (Liga Profesional)
+    "ARG": 0.82,
+    # Mexico (Liga MX)
+    "MEX": 0.80,
+    # USA (MLS)
+    "USA": 0.78,
+    # Saudi Arabia (Pro League)
+    "KSA": 0.76,
+    "SAU": 0.76,
+    # Japan (J-League)
+    "JPN": 0.77,
+    # South Korea (K-League)
+    "KOR": 0.77,
+    # All other countries outside top leagues
+    "__default__": 0.74,
 }
 
 # ── League quality weight (for national team rating calc) ────────────────────
