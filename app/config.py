@@ -20,6 +20,15 @@ FORMATIONS = {
 FORMATION_NAME_TO_CODE = {v: k for k, v in FORMATIONS.items()}
 
 # ── League ID → name (BSD events list returns league_id only) ─────────────────
+LEAGUE_NAMES = {
+    17:"Premier League", 8:"La Liga", 5:"Bundesliga", 11:"Serie A",
+    4:"Ligue 1", 2:"Champions League", 3:"Europa League",
+    848:"Conference League", 88:"Eredivisie", 94:"Primeira Liga",
+    39:"Scottish Premiership", 144:"Belgian Pro League",
+    203:"Süper Lig", 197:"Austrian Bundesliga",
+}
+
+# ── League quality weight (for national team rating calc) ────────────────────
 LEAGUE_WEIGHTS: dict[str, float] = {
     # England (Premier League, Championship)
     "ENG": 1.00,
@@ -66,14 +75,6 @@ LEAGUE_WEIGHTS: dict[str, float] = {
     "__default__": 0.74,
 }
 
-# ── League quality weight (for national team rating calc) ────────────────────
-LEAGUE_WEIGHTS = {
-    "Premier League": 1.00, "La Liga": 0.98, "Bundesliga": 0.96,
-    "Serie A": 0.95, "Ligue 1": 0.93, "Champions League": 1.05,
-    "Europa League": 0.97, "Eredivisie": 0.88, "Primeira Liga": 0.87,
-    "Scottish Premiership": 0.82, "Belgian Pro League": 0.84,
-    "Süper Lig": 0.85, "Austrian Bundesliga": 0.80,
-}
 
 # ── Position mapping from BSD specific_position ──────────────────────────────
 SPECIFIC_POS_MAP = {
