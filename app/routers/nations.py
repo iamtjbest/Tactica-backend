@@ -1,384 +1,413 @@
 """
-app/routers/nations.py — World Cup 2026 nations module
-
-FIX: The 70/70 default rating was caused by using placeholder team IDs (1-18)
-that don't exist in BSD's database. The fix: resolve teams by NAME first using
-bsd_find_team(), then fetch their BSD squad by the resolved ID.
-
+app/routers/nations.py — World Cup 2026 nations module (v2 — CORRECTED)
+ 
+ROOT CAUSE OF THE 70/70 BUG (fixed in this version):
+The previous version called generic club endpoints (/players/?team_id=,
+/teams/{id}/squad/) to fetch national squads. BSD does NOT serve World Cup
+squads from those endpoints — it has a DEDICATED endpoint:
+ 
+    GET /api/v2/worldcup/squads/{bsd_team_id}/
+ 
+This returns players with this shape (confirmed from prior integration work):
+    { id, team_id, name, jersey_number, position, status, call_up_date,
+      club, club_country, caps, goals, date_of_birth, age, player_id }
+ 
+Note: this endpoint does NOT return per-90 stats or BSD match ratings —
+only caps, goals, age, club, club_country. The rating formula below is
+redesigned to use ONLY fields this endpoint actually provides (no more
+silently falling back to fabricated "quality" numbers).
+ 
 Endpoints:
-  GET  /api/nations/squads           — all WC squads (optional ?group=A)
-  GET  /api/nations/squads/{id}      — single team squad (by our internal id)
+  GET  /api/nations/squads           — registry of all 48 nations
+  GET  /api/nations/squads/{id}      — single nation's live squad + ratings
   POST /api/nations/predict          — formation prediction for two nations
+  POST /api/nations/lineup           — probable Starting XI for one nation  [NEW]
 """
-
+ 
 import time
-import math
+from datetime import date
 from fastapi import APIRouter, Query, Path, HTTPException
-from app.config import (
-    bsd_get, bsd_find_team, cache_read, cache_write, cache_age,
-    LEAGUE_WEIGHTS,
-)
-from app.ml_model import score_all_formations
-
+from app.config import bsd_get, bsd_find_team, cache_read, cache_write, cache_age, LEAGUE_WEIGHTS
+ 
 router = APIRouter()
-
-# ── Static WC2026 nation registry (matches frontend WC_2026_NATIONS) ──────────
-# id: our internal reference id (matches frontend)
-# bsd_names: list of name variants to try when resolving against BSD
+ 
+# ── 48-nation registry — MUST match frontend WC_2026_NATIONS exactly ─────────
+# FIFA-confirmed final field (locked March 2026).
 WC_NATIONS: list[dict] = [
-    # CONMEBOL (6)
-    {"id":  1, "name": "Argentina",              "bsd_names": ["Argentina"],                    "conf": "CONMEBOL", "code": "AR"},
-    {"id":  2, "name": "Brazil",                 "bsd_names": ["Brazil", "Brasil"],             "conf": "CONMEBOL", "code": "BR"},
-    {"id":  3, "name": "Colombia",               "bsd_names": ["Colombia"],                     "conf": "CONMEBOL", "code": "CO"},
-    {"id":  4, "name": "Ecuador",                "bsd_names": ["Ecuador"],                      "conf": "CONMEBOL", "code": "EC"},
-    {"id":  5, "name": "Paraguay",               "bsd_names": ["Paraguay"],                     "conf": "CONMEBOL", "code": "PY"},
-    {"id":  6, "name": "Uruguay",                "bsd_names": ["Uruguay"],                      "conf": "CONMEBOL", "code": "UY"},
-    
-    # UEFA (16)
-    {"id":  7, "name": "Austria",                "bsd_names": ["Austria", "Österreich"],        "conf": "UEFA",     "code": "AT"},
-    {"id":  8, "name": "Belgium",                "bsd_names": ["Belgium", "Belgique"],          "conf": "UEFA",     "code": "BE"},
-    {"id":  9, "name": "Bosnia and Herzegovina", "bsd_names": ["Bosnia and Herzegovina", "Bosnia"], "conf": "UEFA", "code": "BA"},
-    {"id": 10, "name": "Croatia",                "bsd_names": ["Croatia", "Hrvatska"],          "conf": "UEFA",     "code": "HR"},
-    {"id": 11, "name": "Czechia",                "bsd_names": ["Czechia", "Czech Republic"],    "conf": "UEFA",     "code": "CZ"},
-    {"id": 12, "name": "England",                "bsd_names": ["England"],                      "conf": "UEFA",     "code": "ENG"},
-    {"id": 13, "name": "France",                 "bsd_names": ["France"],                       "conf": "UEFA",     "code": "FR"},
-    {"id": 14, "name": "Germany",                "bsd_names": ["Germany", "Deutschland"],       "conf": "UEFA",     "code": "DE"},
-    {"id": 15, "name": "Netherlands",            "bsd_names": ["Netherlands", "Holland"],       "conf": "UEFA",     "code": "NL"},
-    {"id": 16, "name": "Norway",                 "bsd_names": ["Norway", "Norge"],              "conf": "UEFA",     "code": "NO"},
-    {"id": 17, "name": "Portugal",               "bsd_names": ["Portugal"],                     "conf": "UEFA",     "code": "PT"},
-    {"id": 18, "name": "Scotland",               "bsd_names": ["Scotland"],                     "conf": "UEFA",     "code": "SCO"},
-    {"id": 19, "name": "Spain",                  "bsd_names": ["Spain", "España"],              "conf": "UEFA",     "code": "ES"},
-    {"id": 20, "name": "Sweden",                 "bsd_names": ["Sweden", "Sverige"],            "conf": "UEFA",     "code": "SE"},
-    {"id": 21, "name": "Switzerland",            "bsd_names": ["Switzerland", "Schweiz"],       "conf": "UEFA",     "code": "CH"},
-    {"id": 22, "name": "Türkiye",                "bsd_names": ["Türkiye", "Turkey"],            "conf": "UEFA",     "code": "TR"},
-
-    # CAF (10)
-    {"id": 23, "name": "Algeria",                "bsd_names": ["Algeria", "Algérie"],           "conf": "CAF",      "code": "DZ"},
-    {"id": 24, "name": "Cabo Verde",             "bsd_names": ["Cabo Verde", "Cape Verde"],     "conf": "CAF",      "code": "CV"},
-    {"id": 25, "name": "Côte d'Ivoire",          "bsd_names": ["Côte d'Ivoire", "Ivory Coast"], "conf": "CAF",      "code": "CI"},
-    {"id": 26, "name": "DR Congo",               "bsd_names": ["DR Congo", "Congo DR", "DRC"],  "conf": "CAF",      "code": "CD"},
-    {"id": 27, "name": "Egypt",                  "bsd_names": ["Egypt"],                        "conf": "CAF",      "code": "EG"},
-    {"id": 28, "name": "Ghana",                  "bsd_names": ["Ghana"],                        "conf": "CAF",      "code": "GH"},
-    {"id": 29, "name": "Morocco",                "bsd_names": ["Morocco", "Maroc"],             "conf": "CAF",      "code": "MA"},
-    {"id": 30, "name": "Senegal",                "bsd_names": ["Senegal"],                      "conf": "CAF",      "code": "SN"},
-    {"id": 31, "name": "South Africa",           "bsd_names": ["South Africa", "Bafana Bafana"],"conf": "CAF",      "code": "ZA"},
-    {"id": 32, "name": "Tunisia",                "bsd_names": ["Tunisia", "Tunisie"],           "conf": "CAF",      "code": "TN"},
-
-    # AFC (9)
-    {"id": 33, "name": "Australia",              "bsd_names": ["Australia", "Socceroos"],       "conf": "AFC",      "code": "AU"},
-    {"id": 34, "name": "Iran",                   "bsd_names": ["Iran", "IR Iran"],              "conf": "AFC",      "code": "IR"},
-    {"id": 35, "name": "Iraq",                   "bsd_names": ["Iraq"],                         "conf": "AFC",      "code": "IQ"},
-    {"id": 36, "name": "Japan",                  "bsd_names": ["Japan", "Japon"],               "conf": "AFC",      "code": "JP"},
-    {"id": 37, "name": "Jordan",                 "bsd_names": ["Jordan"],                       "conf": "AFC",      "code": "JO"},
-    {"id": 38, "name": "Qatar",                  "bsd_names": ["Qatar"],                        "conf": "AFC",      "code": "QA"},
-    {"id": 39, "name": "Saudi Arabia",           "bsd_names": ["Saudi Arabia"],                 "conf": "AFC",      "code": "SA"},
-    {"id": 40, "name": "South Korea",            "bsd_names": ["South Korea", "Korea Republic"],"conf": "AFC",      "code": "KR"},
-    {"id": 41, "name": "Uzbekistan",             "bsd_names": ["Uzbekistan"],                   "conf": "AFC",      "code": "UZ"},
-
-    # CONCACAF (6)
-    {"id": 42, "name": "Canada",                 "bsd_names": ["Canada"],                       "conf": "CONCACAF", "code": "CA"},
-    {"id": 43, "name": "Curaçao",                "bsd_names": ["Curaçao", "Curacao"],           "conf": "CONCACAF", "code": "CW"},
-    {"id": 44, "name": "Haiti",                  "bsd_names": ["Haiti"],                        "conf": "CONCACAF", "code": "HT"},
-    {"id": 45, "name": "Mexico",                 "bsd_names": ["Mexico", "México"],             "conf": "CONCACAF", "code": "MX"},
-    {"id": 46, "name": "Panama",                 "bsd_names": ["Panama", "Panamá"],             "conf": "CONCACAF", "code": "PA"},
-    {"id": 47, "name": "United States",          "bsd_names": ["United States", "USA"],         "conf": "CONCACAF", "code": "US"},
-
-    # OFC (1)
-    {"id": 48, "name": "New Zealand",            "bsd_names": ["New Zealand", "All Whites"],    "conf": "OFC",      "code": "NZ"}
+    {"id": 1,  "name": "Canada",        "bsd_names": ["Canada"],                                   "conf": "CONCACAF"},
+    {"id": 2,  "name": "Mexico",        "bsd_names": ["Mexico", "México"],                          "conf": "CONCACAF"},
+    {"id": 3,  "name": "USA",           "bsd_names": ["USA", "United States"],                       "conf": "CONCACAF"},
+    {"id": 4,  "name": "Curaçao",       "bsd_names": ["Curacao", "Curaçao"],                         "conf": "CONCACAF"},
+    {"id": 5,  "name": "Haiti",         "bsd_names": ["Haiti"],                                      "conf": "CONCACAF"},
+    {"id": 6,  "name": "Panama",        "bsd_names": ["Panama", "Panamá"],                           "conf": "CONCACAF"},
+    {"id": 7,  "name": "Argentina",     "bsd_names": ["Argentina"],                                  "conf": "CONMEBOL"},
+    {"id": 8,  "name": "Brazil",        "bsd_names": ["Brazil", "Brasil"],                            "conf": "CONMEBOL"},
+    {"id": 9,  "name": "Colombia",      "bsd_names": ["Colombia"],                                   "conf": "CONMEBOL"},
+    {"id": 10, "name": "Ecuador",       "bsd_names": ["Ecuador"],                                    "conf": "CONMEBOL"},
+    {"id": 11, "name": "Paraguay",      "bsd_names": ["Paraguay"],                                   "conf": "CONMEBOL"},
+    {"id": 12, "name": "Uruguay",       "bsd_names": ["Uruguay"],                                    "conf": "CONMEBOL"},
+    {"id": 13, "name": "Austria",       "bsd_names": ["Austria"],                                    "conf": "UEFA"},
+    {"id": 14, "name": "Belgium",       "bsd_names": ["Belgium", "Belgique"],                        "conf": "UEFA"},
+    {"id": 15, "name": "Bosnia and Herzegovina", "bsd_names": ["Bosnia and Herzegovina", "Bosnia"],  "conf": "UEFA"},
+    {"id": 16, "name": "Croatia",       "bsd_names": ["Croatia", "Hrvatska"],                        "conf": "UEFA"},
+    {"id": 17, "name": "Czechia",       "bsd_names": ["Czechia", "Czech Republic"],                  "conf": "UEFA"},
+    {"id": 18, "name": "England",       "bsd_names": ["England"],                                    "conf": "UEFA"},
+    {"id": 19, "name": "France",        "bsd_names": ["France"],                                     "conf": "UEFA"},
+    {"id": 20, "name": "Germany",       "bsd_names": ["Germany", "Deutschland"],                     "conf": "UEFA"},
+    {"id": 21, "name": "Netherlands",   "bsd_names": ["Netherlands", "Holland"],                     "conf": "UEFA"},
+    {"id": 22, "name": "Norway",        "bsd_names": ["Norway", "Norge"],                            "conf": "UEFA"},
+    {"id": 23, "name": "Portugal",      "bsd_names": ["Portugal"],                                   "conf": "UEFA"},
+    {"id": 24, "name": "Scotland",      "bsd_names": ["Scotland"],                                   "conf": "UEFA"},
+    {"id": 25, "name": "Spain",         "bsd_names": ["Spain", "España"],                            "conf": "UEFA"},
+    {"id": 26, "name": "Sweden",        "bsd_names": ["Sweden", "Sverige"],                          "conf": "UEFA"},
+    {"id": 27, "name": "Switzerland",   "bsd_names": ["Switzerland", "Schweiz"],                     "conf": "UEFA"},
+    {"id": 28, "name": "Türkiye",       "bsd_names": ["Turkey", "Türkiye"],                          "conf": "UEFA"},
+    {"id": 29, "name": "Algeria",       "bsd_names": ["Algeria"],                                    "conf": "CAF"},
+    {"id": 30, "name": "Cabo Verde",    "bsd_names": ["Cabo Verde", "Cape Verde"],                   "conf": "CAF"},
+    {"id": 31, "name": "DR Congo",      "bsd_names": ["DR Congo", "Congo DR", "DRC"],                "conf": "CAF"},
+    {"id": 32, "name": "Côte d'Ivoire", "bsd_names": ["Cote d'Ivoire", "Côte d'Ivoire", "Ivory Coast"],"conf": "CAF"},
+    {"id": 33, "name": "Egypt",         "bsd_names": ["Egypt"],                                      "conf": "CAF"},
+    {"id": 34, "name": "Ghana",         "bsd_names": ["Ghana"],                                      "conf": "CAF"},
+    {"id": 35, "name": "Morocco",       "bsd_names": ["Morocco", "Maroc"],                           "conf": "CAF"},
+    {"id": 36, "name": "Senegal",       "bsd_names": ["Senegal"],                                    "conf": "CAF"},
+    {"id": 37, "name": "South Africa",  "bsd_names": ["South Africa", "Bafana Bafana"],              "conf": "CAF"},
+    {"id": 38, "name": "Tunisia",       "bsd_names": ["Tunisia", "Tunisie"],                         "conf": "CAF"},
+    {"id": 39, "name": "Australia",     "bsd_names": ["Australia", "Socceroos"],                     "conf": "AFC"},
+    {"id": 40, "name": "Iraq",          "bsd_names": ["Iraq"],                                       "conf": "AFC"},
+    {"id": 41, "name": "Iran",          "bsd_names": ["Iran", "IR Iran"],                             "conf": "AFC"},
+    {"id": 42, "name": "Japan",         "bsd_names": ["Japan", "Japon"],                              "conf": "AFC"},
+    {"id": 43, "name": "Jordan",        "bsd_names": ["Jordan"],                                     "conf": "AFC"},
+    {"id": 44, "name": "South Korea",   "bsd_names": ["South Korea", "Korea Republic", "Korea South"],"conf": "AFC"},
+    {"id": 45, "name": "Qatar",         "bsd_names": ["Qatar"],                                      "conf": "AFC"},
+    {"id": 46, "name": "Saudi Arabia",  "bsd_names": ["Saudi Arabia"],                                "conf": "AFC"},
+    {"id": 47, "name": "Uzbekistan",    "bsd_names": ["Uzbekistan"],                                  "conf": "AFC"},
+    {"id": 48, "name": "New Zealand",   "bsd_names": ["New Zealand", "All Whites"],                  "conf": "OFC"},
 ]
-
-# Quick lookup maps
+ 
 _BY_ID   = {n["id"]:   n for n in WC_NATIONS}
 _BY_NAME = {n["name"]: n for n in WC_NATIONS}
-
-# Cache TTL: 24 h for WC squads (they change infrequently)
-SQUAD_TTL = 86_400
-
-
-# ── Helper: resolve nation → BSD team_id via name ─────────────────────────────
-
+ 
+SQUAD_TTL = 21_600  # 6h — squads change rarely, but allow same-day correction
+ 
+# Standard formations → slot counts. First number = DF, last = FW, middle = MF.
+def parse_formation_slots(formation: str) -> dict:
+    nums_str = formation.split()[0]  # strip suffix words like "Diamond"
+    parts = [int(x) for x in nums_str.split("-") if x.isdigit()]
+    if len(parts) < 2:
+        return {"GK": 1, "DF": 4, "MF": 3, "FW": 3}  # safe default
+    df = parts[0]
+    fw = parts[-1]
+    mf = sum(parts[1:-1]) if len(parts) > 2 else 0
+    return {"GK": 1, "DF": df, "MF": mf, "FW": fw}
+ 
+ 
+# ── Resolve nation → real BSD team_id ─────────────────────────────────────────
+ 
 def resolve_nation_bsd_id(nation: dict) -> tuple[int | None, str]:
-    """
-    Try each name variant in bsd_names order.
-    Returns (bsd_team_id, bsd_team_name) or (None, "").
-    """
-    cache_key = f"nation_bsd_id__{nation['code']}"
+    cache_key = f"nation_bsd_id_v2__{nation['id']}"
     cached = cache_read(cache_key)
     if cached and cache_age(cached) < SQUAD_TTL:
-        return cached["bsd_id"], cached["bsd_name"]
-
+        return cached.get("bsd_id"), cached.get("bsd_name", "")
+ 
     for name_try in nation["bsd_names"]:
         bsd_id, bsd_name = bsd_find_team(name_try)
         if bsd_id:
             cache_write(cache_key, {"bsd_id": bsd_id, "bsd_name": bsd_name})
             return bsd_id, bsd_name
-
+ 
+    cache_write(cache_key, {"bsd_id": None, "bsd_name": ""})
     return None, ""
-
-
-# ── Helper: score a national team's squad ────────────────────────────────────
-
-def score_nation_squad(bsd_team_id: int, nation_name: str) -> dict:
+ 
+ 
+# ── Fetch + score a national squad using the CORRECT BSD endpoint ────────────
+ 
+def fetch_and_score_squad(bsd_team_id: int, nation_name: str) -> dict:
     """
-    Fetches players for a national team via BSD /players/?team_id={id}
-    and computes attack/defence ratings using the national team formula:
-
-        Player Score = (Form×0.35 + Quality×0.30 + Experience×0.20 + Age×0.15)
-                       × league_weight
-
-        Form:       goals_per90 + assists_per90 (from BSD stats)
-        Quality:    average_rating × 10  (BSD match ratings, 0–10 scale × 10)
-        Experience: min(caps, 100) / 100 × 100  (capped at 100)
-        Age:        peak at 26–29 yrs, bell-curve scoring
-
-    Attack  = avg score of top-4 FW/MF players
-    Defence = avg score of top-4 DF/GK players
+    Calls GET /worldcup/squads/{bsd_team_id}/ — the actual BSD endpoint for
+    World Cup national squads. Scores each player using ONLY fields this
+    endpoint provides: caps, goals, age, club_country, position, status.
+ 
+    Rating formula (honest given available data):
+      Attacking positions (F/M):
+        score = caps_score×0.35 + goals_score×0.35 + age_score×0.30
+      Defensive positions (D/G):
+        score = caps_score×0.55 + age_score×0.25 + goals_score×0.20
+      Final score × league_weight (based on club_country)
     """
-    cache_key = f"nation_squad_{bsd_team_id}"
+    cache_key = f"nation_squad_v2_{bsd_team_id}"
     cached = cache_read(cache_key)
     if cached and cache_age(cached) < SQUAD_TTL:
         return cached
-
+ 
+    data = bsd_get(f"/worldcup/squads/{bsd_team_id}/")
+ 
     players_raw = []
-
-    # BSD endpoint: /players/?team_id={id}&limit=50
-    data = bsd_get("/players/", params={"team_id": bsd_team_id, "limit": 50})
-    if data and data.get("results"):
-        players_raw = data["results"]
-    elif data and isinstance(data, list):
-        players_raw = data
-
-    if not players_raw:
-        # Fallback: try /teams/{id}/squad/
-        squad_data = bsd_get(f"/teams/{bsd_team_id}/squad/")
-        if squad_data and squad_data.get("players"):
-            players_raw = squad_data["players"]
-
+    if data:
+        if isinstance(data, list):
+            players_raw = data
+        elif isinstance(data, dict):
+            players_raw = data.get("results") or data.get("squad") or data.get("players") or []
+ 
     scored: list[dict] = []
     for p in players_raw:
-        name    = p.get("name") or p.get("display_name") or "Unknown"
-        pos_raw = (p.get("position") or p.get("pos") or "M").upper()
-        pos     = pos_raw[0] if pos_raw else "M"  # G / D / M / F
-
-        # ── Form (goals+assists per 90 from BSD stats) ────────────────────
-        stats = p.get("stats") or p.get("season_stats") or {}
-        goals  = float(stats.get("goals", 0) or 0)
-        assists= float(stats.get("assists", 0) or 0)
-        mins   = float(stats.get("minutes_played", stats.get("minutes", 90)) or 90)
-        mins   = max(mins, 1)
-        ga_p90 = (goals + assists) / (mins / 90)
-        form_score = min(ga_p90 * 25, 100)  # 4 G+A/90 = 100
-
-        # ── Quality (BSD match rating) ────────────────────────────────────
-        rating_raw = float(
-            stats.get("rating", stats.get("average_rating", 7.0)) or 7.0
-        )
-        quality_score = rating_raw * 10  # 0–10 → 0–100
-
-        # ── Experience (international caps) ──────────────────────────────
-        caps = int(p.get("caps", p.get("national_caps", 30)) or 30)
-        exp_score = min(caps, 100)
-
-        # ── Age factor ───────────────────────────────────────────────────
-        dob = p.get("date_of_birth", p.get("dob", ""))
-        age = p.get("age", 27)
-        if not age and dob:
+        # Skip withdrawn/injured players if status field indicates exclusion
+        status = (p.get("status") or "").lower()
+        if status in ("withdrawn", "injured", "out", "unavailable"):
+            continue
+ 
+        name = p.get("name") or "Unknown"
+        pos_raw = (p.get("position") or "M").upper()
+        # Normalise to single-letter G/D/M/F regardless of how BSD spells it
+        if pos_raw.startswith("G"):   pos = "G"
+        elif pos_raw.startswith("D"): pos = "D"
+        elif pos_raw.startswith("F") or pos_raw in ("ST", "CF", "FW"): pos = "F"
+        else: pos = "M"
+ 
+        caps  = int(p.get("caps", 0) or 0)
+        goals = int(p.get("goals", 0) or 0)
+ 
+        age = p.get("age")
+        if not age:
+            dob = p.get("date_of_birth", "")
             try:
-                from datetime import date
                 birth = date.fromisoformat(str(dob)[:10])
-                age   = (date.today() - birth).days // 365
+                age = (date.today() - birth).days // 365
             except Exception:
                 age = 27
         age = int(age or 27)
-        # Peak at 26–29; below 22 and above 34 penalised
-        if   age < 18: age_score = 40
-        elif age < 22: age_score = 60 + (age - 18) * 5
-        elif age < 26: age_score = 80 + (age - 22) * 2
+ 
+        club_country = (p.get("club_country") or "").strip().upper()
+        league_weight = LEAGUE_WEIGHTS.get(club_country, LEAGUE_WEIGHTS.get("__default__", 0.74))
+ 
+        # ── Sub-scores (0-100 scale) ──────────────────────────────────────
+        caps_score  = min(caps, 100)
+        # Goals: attackers/midfielders scored more generously than defenders
+        goals_cap   = 30 if pos in ("F", "M") else 10
+        goals_score = min((goals / max(goals_cap, 1)) * 100, 100)
+        # Age: peak at 26-29
+        if   age < 20: age_score = 55
+        elif age < 23: age_score = 65 + (age - 20) * 5
+        elif age < 26: age_score = 80 + (age - 23) * 2.5
         elif age <= 29: age_score = 88
         elif age <= 32: age_score = 88 - (age - 29) * 4
         elif age <= 35: age_score = 76 - (age - 32) * 6
         else:           age_score = 58
-
-        # ── League quality weight ─────────────────────────────────────────
-        club_country = (p.get("club_country") or p.get("nationality") or "").upper()
-        league_weight = LEAGUE_WEIGHTS.get(club_country, 0.74)
-
-        # ── Composite score ───────────────────────────────────────────────
-        raw_score = (
-            form_score    * 0.35 +
-            quality_score * 0.30 +
-            exp_score     * 0.20 +
-            age_score     * 0.15
-        )
+ 
+        if pos in ("F", "M"):
+            raw_score = caps_score * 0.35 + goals_score * 0.35 + age_score * 0.30
+        else:  # D, G
+            raw_score = caps_score * 0.55 + age_score * 0.25 + goals_score * 0.20
+ 
         final_score = round(raw_score * league_weight, 2)
-
+ 
         scored.append({
-            "name":   name,
-            "pos":    pos,
-            "score":  final_score,
+            "name": name, "pos": pos, "club": p.get("club", ""),
+            "club_country": club_country, "caps": caps, "goals": goals,
+            "age": age, "score": final_score,
         })
-
-    # Sort by score descending
+ 
     scored.sort(key=lambda x: x["score"], reverse=True)
-
-    # Attack = avg of top-4 FW/MF
+ 
     attackers = [p for p in scored if p["pos"] in ("F", "M")][:4]
-    # Defence = avg of top-4 DF/GK
     defenders = [p for p in scored if p["pos"] in ("D", "G")][:4]
-
-    attack  = round(sum(p["score"] for p in attackers)  / max(len(attackers), 1), 1) if attackers  else 70.0
-    defence = round(sum(p["score"] for p in defenders) / max(len(defenders), 1), 1) if defenders else 70.0
-
-    # Clamp to 50–98
-    attack  = max(50, min(98, attack))
-    defence = max(50, min(98, defence))
-
+ 
+    attack  = round(sum(p["score"] for p in attackers)  / len(attackers),  1) if attackers  else None
+    defence = round(sum(p["score"] for p in defenders) / len(defenders), 1) if defenders else None
+ 
     result = {
-        "_cached_at":   time.time(),
-        "team_id":      bsd_team_id,
-        "team_name":    nation_name,
-        "attack":       attack,
-        "defence":      defence,
-        "squad_count":  len(scored),
-        "players_rated": len(scored),
-        "top_players":  scored[:10],
+        "_cached_at":  time.time(),
+        "team_id":     bsd_team_id,
+        "team_name":   nation_name,
+        "attack":      max(50, min(98, attack))  if attack  is not None else None,
+        "defence":     max(50, min(98, defence)) if defence is not None else None,
+        "squad_count": len(scored),
+        "raw_player_count": len(players_raw),
+        "all_players": scored,
     }
     cache_write(cache_key, result)
     return result
-
-
+ 
+ 
 # ── GET /api/nations/squads ───────────────────────────────────────────────────
-
+ 
 @router.get("/nations/squads")
 def nations_squads(group: str = Query(None, description="Filter by confederation e.g. UEFA")):
     nations = WC_NATIONS
     if group:
         nations = [n for n in nations if n["conf"].upper() == group.upper()]
-    return {
-        "count":  len(nations),
-        "nations": nations,
-    }
-
-
+    return {"count": len(nations), "nations": nations}
+ 
+ 
 # ── GET /api/nations/squads/{id} ─────────────────────────────────────────────
-
+ 
 @router.get("/nations/squads/{nation_id}")
-def nation_squad(nation_id: int = Path(..., description="Nation internal ID (1-48)")):
+def nation_squad(nation_id: int = Path(...)):
     nation = _BY_ID.get(nation_id)
     if not nation:
         raise HTTPException(status_code=404, detail=f"Nation ID {nation_id} not found.")
-
+ 
     bsd_id, bsd_name = resolve_nation_bsd_id(nation)
     if not bsd_id:
         return {
-            "nation_id":   nation_id,
-            "nation_name": nation["name"],
-            "conf":        nation["conf"],
-            "bsd_found":   False,
-            "message":     f"BSD does not have '{nation['name']}' in its national team database yet.",
-            "squad":       [],
+            "nation_id": nation_id, "nation_name": nation["name"], "conf": nation["conf"],
+            "bsd_found": False,
+            "message": f"BSD could not resolve a team for '{nation['name']}' using any name variant.",
+            "squad": [],
         }
-
-    squad_data = score_nation_squad(bsd_id, nation["name"])
+ 
+    squad_data = fetch_and_score_squad(bsd_id, nation["name"])
+    if squad_data["squad_count"] == 0:
+        return {
+            "nation_id": nation_id, "nation_name": nation["name"], "bsd_name": bsd_name,
+            "conf": nation["conf"], "bsd_found": True, "squad_found": False,
+            "raw_player_count": squad_data["raw_player_count"],
+            "message": f"BSD resolved team ID {bsd_id} but /worldcup/squads/{bsd_id}/ returned no players. "
+                       f"BSD may not have published this nation's WC2026 squad yet.",
+            "squad": [],
+        }
+ 
     return {
-        "nation_id":    nation_id,
-        "nation_name":  nation["name"],
-        "bsd_name":     bsd_name,
-        "conf":         nation["conf"],
-        "bsd_found":    True,
-        "squad_count":  squad_data["squad_count"],
-        "attack":       squad_data["attack"],
-        "defence":      squad_data["defence"],
-        "top_players":  squad_data["top_players"],
+        "nation_id": nation_id, "nation_name": nation["name"], "bsd_name": bsd_name,
+        "conf": nation["conf"], "bsd_found": True, "squad_found": True,
+        "squad_count": squad_data["squad_count"],
+        "attack": squad_data["attack"], "defence": squad_data["defence"],
+        "top_players": squad_data["all_players"][:10],
     }
-
-
+ 
+ 
 # ── POST /api/nations/predict ─────────────────────────────────────────────────
-
+ 
 @router.post("/nations/predict")
 def nations_predict(body: dict):
-    """
-    POST body:
-      team_id:   int     — our internal nation id (1-48)
-      opp_id:    int     — our internal nation id
-      team_name: str     — display name (used as fallback if BSD ID fails)
-      opp_name:  str     — display name
-
-    Returns formation prediction based on national team ratings.
-    Falls back to default 70/70 ratings only when BSD truly has no data —
-    includes a clear warning in the response when this happens.
-    """
+    from app.ml_model import score_all_formations
+ 
     team_id   = int(body.get("team_id",   0))
     opp_id    = int(body.get("opp_id",    0))
     team_name = str(body.get("team_name", ""))
     opp_name  = str(body.get("opp_name",  ""))
-
-    # Resolve nation objects
+ 
     my_nation  = _BY_ID.get(team_id)  or _BY_NAME.get(team_name)
     opp_nation = _BY_ID.get(opp_id)   or _BY_NAME.get(opp_name)
-
     if not my_nation:
         raise HTTPException(status_code=404, detail=f"Nation '{team_name}' (id={team_id}) not in registry.")
     if not opp_nation:
         raise HTTPException(status_code=404, detail=f"Nation '{opp_name}' (id={opp_id}) not in registry.")
-
+ 
     warnings = []
-
-    # ── Resolve team from BSD ──────────────────────────────────────────────
+ 
     my_bsd_id,  my_bsd_name  = resolve_nation_bsd_id(my_nation)
     opp_bsd_id, opp_bsd_name = resolve_nation_bsd_id(opp_nation)
-
-    # ── Score squads (or fall back to 70 with a warning) ──────────────────
+ 
     if my_bsd_id:
-        my_data  = score_nation_squad(my_bsd_id,  my_nation["name"])
-        my_attack   = my_data["attack"]
-        my_defence  = my_data["defence"]
-        my_count    = my_data["squad_count"]
-        my_rated    = my_data["players_rated"]
+        my_data = fetch_and_score_squad(my_bsd_id, my_nation["name"])
+        if my_data["attack"] is None:
+            warnings.append(f"BSD team resolved for '{my_nation['name']}' but squad endpoint returned no usable players. Using 70/70 default.")
+            my_attack, my_defence, my_count = 70.0, 70.0, 0
+        else:
+            my_attack, my_defence, my_count = my_data["attack"], my_data["defence"], my_data["squad_count"]
     else:
-        warnings.append(f"BSD has no squad data for '{my_nation['name']}'. Using default ratings (70/70).")
-        my_attack  = 70.0
-        my_defence = 70.0
-        my_count   = 0
-        my_rated   = 0
-
+        warnings.append(f"BSD has no team match for '{my_nation['name']}'. Using 70/70 default.")
+        my_attack, my_defence, my_count = 70.0, 70.0, 0
+ 
     if opp_bsd_id:
-        opp_data  = score_nation_squad(opp_bsd_id, opp_nation["name"])
-        opp_attack  = opp_data["attack"]
-        opp_defence = opp_data["defence"]
-        opp_count   = opp_data["squad_count"]
+        opp_data = fetch_and_score_squad(opp_bsd_id, opp_nation["name"])
+        if opp_data["attack"] is None:
+            warnings.append(f"BSD team resolved for '{opp_nation['name']}' but squad endpoint returned no usable players. Using 70/70 default.")
+            opp_attack, opp_defence, opp_count = 70.0, 70.0, 0
+        else:
+            opp_attack, opp_defence, opp_count = opp_data["attack"], opp_data["defence"], opp_data["squad_count"]
     else:
-        warnings.append(f"BSD has no squad data for '{opp_nation['name']}'. Using default ratings (70/70).")
-        opp_attack  = 70.0
-        opp_defence = 70.0
-        opp_count   = 0
-
-    # ── ML formation prediction ───────────────────────────────────────────
-    all_formations = score_all_formations(
-        my_attack, my_defence, opp_attack, opp_defence
-    )
+        warnings.append(f"BSD has no team match for '{opp_nation['name']}'. Using 70/70 default.")
+        opp_attack, opp_defence, opp_count = 70.0, 70.0, 0
+ 
+    all_formations = score_all_formations(my_attack, my_defence, opp_attack, opp_defence)
     best = all_formations[0]
-
+ 
     response = {
-        "team":          my_nation["name"],
-        "opponent":      opp_nation["name"],
-        "my_attack":     my_attack,
-        "my_defence":    my_defence,
-        "opp_attack":    opp_attack,
-        "opp_defence":   opp_defence,
-        "best_formation": best["formation"],
-        "probability":   best["probability"],
+        "team": my_nation["name"], "opponent": opp_nation["name"],
+        "my_attack": my_attack, "my_defence": my_defence,
+        "opp_attack": opp_attack, "opp_defence": opp_defence,
+        "best_formation": best["formation"], "probability": best["probability"],
         "all_formations": all_formations,
-        "my_squad_count":  my_count,
-        "opp_squad_count": opp_count,
-        "players_scored":  my_rated,
-        "bsd_resolved": {
-            "team": my_bsd_name  or None,
-            "opp":  opp_bsd_name or None,
-        },
+        "my_squad_count": my_count, "opp_squad_count": opp_count,
+        "players_scored": my_count,
+        "bsd_resolved": {"team": my_bsd_name or None, "opp": opp_bsd_name or None},
     }
-
     if warnings:
         response["warnings"] = warnings
-
     return response
+ 
+ 
+# ── POST /api/nations/lineup ─────────────────────────────────────────────────
+# NEW: probable Starting XI for a national team, mirroring club /api/lineup
+ 
+@router.post("/nations/lineup")
+def nations_lineup(body: dict):
+    nation_id   = int(body.get("nation_id", 0))
+    nation_name = str(body.get("nation_name", ""))
+    formation   = str(body.get("formation", "4-3-3"))
+ 
+    nation = _BY_ID.get(nation_id) or _BY_NAME.get(nation_name)
+    if not nation:
+        raise HTTPException(status_code=404, detail=f"Nation '{nation_name}' not in registry.")
+ 
+    bsd_id, bsd_name = resolve_nation_bsd_id(nation)
+    if not bsd_id:
+        raise HTTPException(status_code=404, detail=f"BSD has no team match for '{nation['name']}'.")
+ 
+    squad_data = fetch_and_score_squad(bsd_id, nation["name"])
+    players = squad_data["all_players"]
+    if not players:
+        raise HTTPException(
+            status_code=404,
+            detail=f"BSD resolved '{nation['name']}' but returned no squad players for the lineup."
+        )
+ 
+    slots = parse_formation_slots(formation)
+    by_pos: dict[str, list[dict]] = {"G": [], "D": [], "M": [], "F": []}
+    for p in players:
+        by_pos[p["pos"]].append(p)
+    for pos in by_pos:
+        by_pos[pos].sort(key=lambda x: x["score"], reverse=True)
+ 
+    xi: list[dict] = []
+    used_names: set[str] = set()
+ 
+    def take(pos_key: str, count: int, label: str):
+        pool = [p for p in by_pos.get(pos_key, []) if p["name"] not in used_names]
+        for p in pool[:count]:
+            xi.append({**p, "slot": label, "fallback": False})
+            used_names.add(p["name"])
+        return max(0, count - len(pool[:count]))
+ 
+    remaining_gk = take("G", slots["GK"], "GK")
+    remaining_df = take("D", slots["DF"], "DF")
+    remaining_mf = take("M", slots["MF"], "MF")
+    remaining_fw = take("F", slots["FW"], "FW")
+ 
+    # Fill any shortfall from the best remaining outfield players (fallback flag)
+    shortfall = remaining_gk + remaining_df + remaining_mf + remaining_fw
+    if shortfall > 0:
+        all_remaining = sorted(
+            [p for pos_list in by_pos.values() for p in pos_list if p["name"] not in used_names],
+            key=lambda x: x["score"], reverse=True,
+        )
+        for p in all_remaining[:shortfall]:
+            xi.append({**p, "slot": p["pos"], "fallback": True})
+            used_names.add(p["name"])
+ 
+    formatted_xi = [
+        {
+            "name": p["name"], "pos": p["slot"], "club": p.get("club", ""),
+            "caps": p.get("caps", 0), "goals": p.get("goals", 0),
+            "age": p.get("age", 0), "score": p.get("score", 0),
+            "fallback": p.get("fallback", False),
+        }
+        for p in xi
+    ]
+ 
+    return {
+        "nation": nation["name"], "formation": formation,
+        "xi": formatted_xi, "count": len(formatted_xi),
+        "squad_size": squad_data["squad_count"], "bsd_resolved": bsd_name or None,
+    }
