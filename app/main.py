@@ -26,21 +26,7 @@ app = FastAPI(
     version="2.0.0",
 )
 
-"""
-CORS FIX — paste this into your Render backend's app/main.py
-
-WHERE: right after you create the FastAPI app instance, BEFORE any
-@app.get(...) routes or app.include_router(...) calls.
-
-If you already have an `add_middleware(CORSMiddleware, ...)` block,
-REPLACE it entirely with this one — don't have two.
-"""
-
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-
-app = FastAPI()  # <- you already have this line, don't duplicate it
-
+# SINGLE, CORRECT CORS CONFIGURATION
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -52,16 +38,6 @@ app.add_middleware(
     # Also allow any Vercel preview deployment URL (changes every push)
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ... your existing routes / app.include_router(...) calls go below this
-
-# Allow requests from Vercel web app and any mobile app
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # tighten to your Vercel domain in production
     allow_methods=["*"],
     allow_headers=["*"],
 )
