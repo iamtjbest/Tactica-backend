@@ -2,12 +2,12 @@
 GET /api/form?team={name}
 Fetches last 5 finished matches for a team.
 Returns: { team, matches[], attack, defence, best_formation }
-24-hour cache per team.
+1-hour cache per team.
 
 BSD calls:
   1 x GET /api/v2/teams/?name={name}          → team_id
-  1 x GET /api/v2/teams/{id}/fixtures/?status=finished&limit=5
-  5 x GET /api/v2/events/{id}/lineups/        → formation used
+  1 x GET /api/v2/teams/{id}/fixtures/?status=finished&limit=20
+  5 x GET /api/v2/events/{id}/lineups/        → formation used (only for final top-5)
 """
 import time
 from datetime import datetime, timedelta
@@ -16,7 +16,7 @@ from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
                         cache_age, LEAGUE_NAMES)
 
 router  = APIRouter()
-FORM_TTL = 86400  # 24 hours
+FORM_TTL = 3600  # 1 hour — was 24h, far too long while a live tournament is on
 
 def _dynamic_ratings(matches: list) -> tuple[int, int]:
     if not matches: return 80, 80
@@ -34,6 +34,22 @@ def _most_used_formation(matches: list) -> str | None:
             counts[f] = counts.get(f, 0) + 1
     return max(counts, key=counts.get) if counts else None
 
+def _fixture_date(fix: dict) -> str:
+    """
+    BSD's exact date field name was never confirmed in the original code
+    (it was never read at all before this fix), so common variants are
+    tried defensively. An empty string sorts LAST under reverse=True,
+    so fixtures with a missing date get pushed to the bottom rather than
+    being mistaken for "most recent".
+    """
+    return (
+        fix.get("event_date")
+        or fix.get("date")
+        or fix.get("kickoff_time")
+        or fix.get("starting_at")
+        or ""
+    )
+
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
     cache_key = f"form__{team.lower().replace(' ','_')}"
@@ -47,18 +63,40 @@ def form(team: str = Query(..., description="Team name")):
     if not team_id:
         raise HTTPException(status_code=404, detail=f"Team '{team}' not found in BSD.")
 
-    # Fetch last 5 finished fixtures
-    # date_from = 6 months back (fixtures endpoint defaults to now-3h→+7d without it)
-    date_from = (datetime.utcnow() - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00Z")
+    # ── THE FIX ──────────────────────────────────────────────────────────
+    # BUG: the old code passed only date_from (180 days back), no date_to,
+    # and trusted limit=5 to return the 5 MOST RECENT matches. BSD's
+    # /fixtures/ endpoint apparently returns results in ASCENDING date
+    # order within the window by default — so limit=5 was grabbing the 5
+    # OLDEST matches sitting right at the start of the 180-day window
+    # (≈ December 2025), not the most recent ones (June 2026).
+    #
+    # FIX: explicitly pass date_to = now, fetch a WIDE batch (20, not 5),
+    # then sort by the real fixture date DESCENDING ourselves in Python
+    # before slicing to the true most-recent 5. We never trust the API's
+    # default ordering again — sorting now happens locally regardless of
+    # whatever order BSD returns results in.
+    now       = datetime.utcnow()
+    date_from = (now - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00Z")
+    date_to   = now.strftime("%Y-%m-%dT23:59:59Z")
+
     data = bsd_get(f"/teams/{team_id}/fixtures/", params={
-        "status": "finished", "limit": 5, "date_from": date_from,
+        "status":    "finished",
+        "limit":     20,          # wide batch — we sort + slice ourselves below
+        "date_from": date_from,
+        "date_to":   date_to,
     })
     if not data:
         raise HTTPException(status_code=502, detail="BSD API error fetching fixtures.")
 
     fixtures = data.get("results", [])
-    matches  = []
 
+    # Explicitly sort by date descending — do NOT trust BSD's default order.
+    fixtures.sort(key=_fixture_date, reverse=True)
+    fixtures = fixtures[:5]   # now genuinely the 5 most recent finished matches
+    # ─────────────────────────────────────────────────────────────────────
+
+    matches = []
     for fix in fixtures:
         fid        = fix.get("id", 0)
         home_id    = fix.get("home_team_id", 0)
@@ -73,9 +111,6 @@ def form(team: str = Query(..., description="Team name")):
         result     = "W" if scored > conceded else ("D" if scored == conceded else "L")
 
         # Lineup for formation
-        # GET /api/v2/events/{id}/lineups/
-        # lineups.home.formation / lineups.away.formation
-        # lineups is null when lineup_status == "unavailable"
         formation = "Unknown"
         ld = bsd_get(f"/events/{fid}/lineups/")
         if ld:
@@ -93,6 +128,7 @@ def form(team: str = Query(..., description="Team name")):
             "conceded":    conceded,
             "result":      result,
             "formation":   formation,
+            "event_date":  _fixture_date(fix),   # NEW — lets you verify recency at a glance
         })
 
     att, dfc  = _dynamic_ratings(matches)
