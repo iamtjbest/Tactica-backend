@@ -30,6 +30,72 @@ from fastapi import APIRouter, Query, Path, HTTPException
 from app.config import bsd_get, bsd_find_team, cache_read, cache_write, cache_age, LEAGUE_WEIGHTS
  
 router = APIRouter()
+
+"""
+DEBUG ADDITION — paste this into your existing app/routers/nations.py
+
+Adds ONE new endpoint that returns BSD's RAW, unprocessed response for a
+nation's World Cup squad — no scoring, no field-name guessing, just the
+exact JSON BSD actually sends back.
+
+This is the safest way to find out the real field names instead of
+guessing again. Once you share what this prints for 2-3 nations, the
+scoring formula in fetch_and_score_squad() can be corrected against
+real data instead of assumptions.
+
+WHERE TO PASTE: anywhere in nations.py, e.g. right after the existing
+GET /nations/squads/{nation_id} endpoint.
+"""
+
+@router.get("/nations/debug/{nation_id}")
+def nations_debug_raw(nation_id: int):
+    """
+    TEMPORARY DEBUG ENDPOINT — remove once the real field names are confirmed.
+
+    Hit this directly in your browser, e.g.:
+      https://your-app.onrender.com/api/nations/debug/20   (Germany)
+      https://your-app.onrender.com/api/nations/debug/8    (Brazil)
+
+    Returns BSD's raw response with ZERO processing, plus which BSD team_id
+    and name your fuzzy matcher resolved it to.
+    """
+    nation = _BY_ID.get(nation_id)
+    if not nation:
+        raise HTTPException(status_code=404, detail=f"Nation ID {nation_id} not found in registry.")
+
+    bsd_id, bsd_name = resolve_nation_bsd_id(nation)
+    if not bsd_id:
+        return {
+            "nation_id": nation_id,
+            "nation_name": nation["name"],
+            "bsd_resolved": False,
+            "message": "Could not resolve a BSD team_id for this nation at all.",
+        }
+
+    raw = bsd_get(f"/worldcup/squads/{bsd_id}/")
+
+    # Show the FULL raw response, plus isolate just the first player object
+    # so the field names are easy to read without scrolling through 26 players.
+    first_player = None
+    if raw:
+        if isinstance(raw, list) and len(raw) > 0:
+            first_player = raw[0]
+        elif isinstance(raw, dict):
+            candidates = raw.get("results") or raw.get("squad") or raw.get("players") or []
+            if candidates:
+                first_player = candidates[0]
+
+    return {
+        "nation_id": nation_id,
+        "nation_name": nation["name"],
+        "bsd_resolved": True,
+        "bsd_team_id": bsd_id,
+        "bsd_team_name": bsd_name,
+        "raw_response_type": type(raw).__name__,
+        "first_player_raw": first_player,
+        "full_raw_response": raw,
+    }
+
  
 # ── 48-nation registry — MUST match frontend WC_2026_NATIONS exactly ─────────
 # FIFA-confirmed final field (locked March 2026).
