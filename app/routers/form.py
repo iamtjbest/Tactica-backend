@@ -4,19 +4,29 @@ Fetches last 5 finished matches for a team.
 Returns: { team, matches[], attack, defence, best_formation }
 1-hour cache per team.
 
+Date window: March 1 2026 → today
+This covers the full end of the 2025-26 European season (Mar-May/Jun 2026)
+while excluding older data from December 2025 and earlier.
+
 BSD calls:
-  1 x GET /api/v2/teams/?name={name}          → team_id
-  1 x GET /api/v2/teams/{id}/fixtures/?status=finished&limit=20
-  5 x GET /api/v2/events/{id}/lineups/        → formation used (only for final top-5)
+  1 x GET /api/v2/teams/?name={name}            → team_id
+  1 x GET /api/v2/teams/{id}/fixtures/?...      → up to 20 finished fixtures
+  ≤5 x GET /api/v2/events/{id}/lineups/         → formation used (top 5 only)
 """
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from fastapi import APIRouter, Query, HTTPException
 from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
                         cache_age, LEAGUE_NAMES)
 
-router  = APIRouter()
-FORM_TTL = 3600  # 1 hour — was 24h, far too long while a live tournament is on
+router   = APIRouter()
+FORM_TTL = 3600   # 1 hour
+
+# Fixed window start — covers end of 2025-26 season.
+# Change this to the new season start date (e.g. 2026-08-01) when clubs
+# resume in August 2026.
+SEASON_START = "2026-03-01T00:00:00Z"
+
 
 def _dynamic_ratings(matches: list) -> tuple[int, int]:
     if not matches: return 80, 80
@@ -26,22 +36,18 @@ def _dynamic_ratings(matches: list) -> tuple[int, int]:
     dfc   = max(60, min(99, int(99 - avg_c * 9.75)))
     return att, dfc
 
+
 def _most_used_formation(matches: list) -> str | None:
-    counts = {}
+    counts: dict[str, int] = {}
     for m in matches:
-        f = m.get("formation","Unknown")
+        f = m.get("formation", "Unknown")
         if f and f != "Unknown":
             counts[f] = counts.get(f, 0) + 1
     return max(counts, key=counts.get) if counts else None
 
+
 def _fixture_date(fix: dict) -> str:
-    """
-    BSD's exact date field name was never confirmed in the original code
-    (it was never read at all before this fix), so common variants are
-    tried defensively. An empty string sorts LAST under reverse=True,
-    so fixtures with a missing date get pushed to the bottom rather than
-    being mistaken for "most recent".
-    """
+    """Try known BSD date field names. Empty string sorts last under reverse=True."""
     return (
         fix.get("event_date")
         or fix.get("date")
@@ -50,9 +56,10 @@ def _fixture_date(fix: dict) -> str:
         or ""
     )
 
+
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
-    cache_key = f"form__{team.lower().replace(' ','_')}"
+    cache_key = f"form__{team.lower().replace(' ', '_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FORM_TTL:
         cached["cached"] = True
@@ -63,27 +70,15 @@ def form(team: str = Query(..., description="Team name")):
     if not team_id:
         raise HTTPException(status_code=404, detail=f"Team '{team}' not found in BSD.")
 
-    # ── THE FIX ──────────────────────────────────────────────────────────
-    # BUG: the old code passed only date_from (180 days back), no date_to,
-    # and trusted limit=5 to return the 5 MOST RECENT matches. BSD's
-    # /fixtures/ endpoint apparently returns results in ASCENDING date
-    # order within the window by default — so limit=5 was grabbing the 5
-    # OLDEST matches sitting right at the start of the 180-day window
-    # (≈ December 2025), not the most recent ones (June 2026).
-    #
-    # FIX: explicitly pass date_to = now, fetch a WIDE batch (20, not 5),
-    # then sort by the real fixture date DESCENDING ourselves in Python
-    # before slicing to the true most-recent 5. We never trust the API's
-    # default ordering again — sorting now happens locally regardless of
-    # whatever order BSD returns results in.
-    now       = datetime.utcnow()
-    date_from = (now - timedelta(days=180)).strftime("%Y-%m-%dT00:00:00Z")
-    date_to   = now.strftime("%Y-%m-%dT23:59:59Z")
+    # Window: March 1 2026 → now
+    # Fetch 20, sort by date DESC in Python, slice to 5 most recent.
+    # Never trust BSD's default ordering — confirmed ascending by default.
+    date_to = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
 
     data = bsd_get(f"/teams/{team_id}/fixtures/", params={
         "status":    "finished",
-        "limit":     20,          # wide batch — we sort + slice ourselves below
-        "date_from": date_from,
+        "limit":     20,
+        "date_from": SEASON_START,
         "date_to":   date_to,
     })
     if not data:
@@ -91,10 +86,9 @@ def form(team: str = Query(..., description="Team name")):
 
     fixtures = data.get("results", [])
 
-    # Explicitly sort by date descending — do NOT trust BSD's default order.
+    # Sort descending by date in Python — do NOT trust BSD's default order
     fixtures.sort(key=_fixture_date, reverse=True)
-    fixtures = fixtures[:5]   # now genuinely the 5 most recent finished matches
-    # ─────────────────────────────────────────────────────────────────────
+    fixtures = fixtures[:5]   # true 5 most recent
 
     matches = []
     for fix in fixtures:
@@ -105,44 +99,43 @@ def form(team: str = Query(..., description="Team name")):
         is_home    = (home_id == team_id)
         scored     = home_score if is_home else away_score
         conceded   = away_score if is_home else home_score
-        opp        = fix.get("away_team","?") if is_home else fix.get("home_team","?")
+        opp        = fix.get("away_team", "?") if is_home else fix.get("home_team", "?")
         league_id  = fix.get("league_id", 0)
         competition = LEAGUE_NAMES.get(league_id, f"League {league_id}")
         result     = "W" if scored > conceded else ("D" if scored == conceded else "L")
 
-        # Lineup for formation
         formation = "Unknown"
         ld = bsd_get(f"/events/{fid}/lineups/")
         if ld:
-            status  = ld.get("lineup_status","unavailable")
+            status  = ld.get("lineup_status", "unavailable")
             lineups = ld.get("lineups")
             if status != "unavailable" and lineups:
                 side      = "home" if is_home else "away"
-                formation = (lineups.get(side) or {}).get("formation","Unknown")
+                formation = (lineups.get(side) or {}).get("formation", "Unknown")
 
         matches.append({
-            "fixture_id":  fid,
-            "opponent":    opp,
-            "competition": competition,
-            "scored":      scored,
-            "conceded":    conceded,
-            "result":      result,
-            "formation":   formation,
-            "event_date":  _fixture_date(fix),   # NEW — lets you verify recency at a glance
+            "fixture_id":   fid,
+            "opponent":     opp,
+            "competition":  competition,
+            "scored":       scored,
+            "conceded":     conceded,
+            "result":       result,
+            "formation":    formation,
+            "event_date":   _fixture_date(fix),
         })
 
     att, dfc  = _dynamic_ratings(matches)
     best_form = _most_used_formation(matches)
 
     result_doc = {
-        "_cached_at":    time.time(),
-        "team":          team,
-        "bsd_name":      bsd_name,
-        "matches":       matches,
-        "attack":        att,
-        "defence":       dfc,
-        "best_formation":best_form,
-        "cached":        False,
+        "_cached_at":     time.time(),
+        "team":           team,
+        "bsd_name":       bsd_name,
+        "matches":        matches,
+        "attack":         att,
+        "defence":        dfc,
+        "best_formation": best_form,
+        "cached":         False,
     }
     cache_write(cache_key, result_doc)
     return result_doc
