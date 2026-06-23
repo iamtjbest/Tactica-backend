@@ -421,7 +421,7 @@ def nations_predict(body: dict):
 
 # ── POST /api/nations/lineup ─────────────────────────────────────────────────
 
-@router.post("/api/nations/lineup")
+@router.post("/nations/lineup")
 def nations_lineup(body: dict):
     """
     Builds a probable Starting XI from the WC squad.
