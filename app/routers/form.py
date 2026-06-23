@@ -70,17 +70,17 @@ def form(team: str = Query(..., description="Team name")):
     if not team_id:
         raise HTTPException(status_code=404, detail=f"Team '{team}' not found in BSD.")
 
-    # Window: today → now (backward search for 5 most recent finished matches)
+    # Window: March 1 2026 → today (counting backwards)
+    # date_from = today, date_to = March 1 (searches backwards)
     # Fetch 20, sort by date DESC in Python, slice to 5 most recent.
     # Never trust BSD's default ordering — confirmed ascending by default.
-    date_from = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
-    date_to = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+    date_from = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
 
     data = bsd_get(f"/teams/{team_id}/fixtures/", params={
         "status":    "finished",
         "limit":     20,
         "date_from": date_from,
-        "date_to":   date_to,
+        "date_to":   SEASON_START,
     })
     if not data:
         raise HTTPException(status_code=502, detail="BSD API error fetching fixtures.")
