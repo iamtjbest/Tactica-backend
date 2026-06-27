@@ -59,36 +59,37 @@ def _compute_win_prob(
     opp_att: float, opp_def: float,
 ) -> float:
     """
-    Compute a theoretically grounded win probability for a given formation
-    and match stats. Used to generate meaningful synthetic training labels.
+    Compute a realistic win probability for a given formation and match stats.
+    Used to generate meaningful synthetic training labels.
 
     Logic:
-      - Goal threat  = how effectively our attack punishes their defence,
-                       scaled by the formation's attacking weight.
-      - Shield value = how effectively our defence handles their attack,
-                       scaled by the formation's defensive weight.
-      - Net advantage = goal_threat + shield - 1.0  (centred around 0)
-      - Win prob = sigmoid(net × 3)  → 0.0–1.0
+      - att_edge = normalised difference between our attack and their defence.
+                   Positive = we outgun them, negative = they shut us down.
+      - def_edge = normalised difference between our defence and their attack.
+                   Positive = we absorb them, negative = they overrun us.
+      - Formation weights amplify the relevant edge:
+          attacking formations (4-3-3, 3-4-3) amplify att_edge
+          defensive formations (5-4-1, 5-3-2) amplify def_edge
+      - net = weighted sum of both edges
+      - win_prob = sigmoid(net × 2.5) → realistic spread
 
-    Examples:
-      team 90att vs opp 60def + 4-3-3 (att_w=0.82) → strong goal threat → ~75%
-      team 55att vs opp 85att + 5-4-1 (def_w=0.90) → good shield → ~55% (damage limit)
-      equal 70/70 both sides + 4-4-2  (0.70/0.72) → ~51% (marginal home-ish edge)
+    Verified examples (all ratings 0-99):
+      Arsenal(88,85) vs AZ(65,68)   4-3-3 → ~68%  ✓ strong favourite
+      PSG(72,71)     vs AZ(65,68)   4-3-3 → ~55%  ✓ slight edge
+      Equal(75,75)   vs (75,75)     4-4-2 → ~50%  ✓ coin flip
+      Weak(55,58)    vs Strong(88,90) 5-4-1→ ~25%  ✓ underdog parking the bus
     """
     att_w, def_w = FORMATION_PROFILES.get(code, (0.70, 0.70))
 
-    # Normalise to 0-1 range
-    ta = team_att / 100.0
-    td = team_def / 100.0
-    oa = opp_att  / 100.0
-    od = opp_def  / 100.0
+    # Edges: difference divided by max range (99) → -1.0 to +1.0
+    att_edge = (team_att - opp_def) / 99.0
+    def_edge = (team_def - opp_att) / 99.0
 
-    goal_threat  = ta * att_w - od * (1.0 - att_w * 0.35)
-    shield_value = td * def_w - oa * (1.0 - def_w * 0.35)
+    # Formation weights scale the relevant edge
+    net = att_edge * att_w + def_edge * def_w
 
-    net = goal_threat + shield_value - 1.0
-    win_prob = 1.0 / (1.0 + np.exp(-net * 3.5))
-    return float(np.clip(win_prob, 0.05, 0.95))
+    win_prob = 1.0 / (1.0 + np.exp(-net * 2.5))
+    return float(np.clip(win_prob, 0.04, 0.96))
 
 
 def _generate_training_data(n_matches: int = 8000, seed: int = 42) -> pd.DataFrame:
@@ -129,24 +130,22 @@ def _generate_training_data(n_matches: int = 8000, seed: int = 42) -> pd.DataFra
 def load_model() -> RandomForestClassifier:
     try:
         clf = joblib.load(MODEL_PATH)
-        # Sanity-check: if the stored model was trained on the old random data
-        # (detectable by checking feature range), retrain with correct data.
-        # Simple check: predict a known-strong attacking scenario and verify
-        # that attacking formations score higher than 5-ATB ones.
+        # Sanity-check: a clearly superior team (att=88, def=85) vs weak side
+        # (att=65, def=68) must score >55% in 4-3-3 AND beat 5-4-1.
+        # Old formula produced ~7% here — force retrain if detected.
         test_att = pd.DataFrame({
             "Formation":    [7, 14],   # 4-3-3 vs 5-4-1
-            "Team_Attack":  [90, 90],
-            "Team_Defense": [75, 75],
-            "Opp_Attack":   [60, 60],
-            "Opp_Defense":  [65, 65],
+            "Team_Attack":  [88, 88],
+            "Team_Defense": [85, 85],
+            "Opp_Attack":   [65, 65],
+            "Opp_Defense":  [68, 68],
         })
         probs = clf.predict_proba(test_att)[:, 1]
-        if probs[0] <= probs[1]:
-            # 5-4-1 is scoring >= 4-3-3 for an attacking team — old model.
-            raise ValueError("Stale model detected — retraining.")
+        if probs[0] < 0.55 or probs[0] <= probs[1]:
+            raise ValueError("Miscalibrated model — retraining with fixed formula.")
         return clf
     except Exception:
-        # Retrain with rule-encoded synthetic data
+        # Retrain with corrected win-probability formula
         df  = _generate_training_data(n_matches=8000, seed=42)
         clf = RandomForestClassifier(
             n_estimators=300,
@@ -162,7 +161,7 @@ def load_model() -> RandomForestClassifier:
         try:
             joblib.dump(clf, MODEL_PATH)
         except Exception:
-            pass   # read-only filesystem on some Render plans — in-memory is fine
+            pass   # read-only filesystem on Render free tier — in-memory is fine
         return clf
 
 
