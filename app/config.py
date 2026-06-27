@@ -114,22 +114,51 @@ def bsd_get(path: str, params: dict = None) -> dict | None:
 def bsd_find_team(name: str) -> tuple[int | None, str | None]:
     """
     Search BSD for a team by name. Returns (team_id, matched_name) or (None, None).
-    Uses GET /api/v2/teams/?name={name}&limit=3  (partial, case-insensitive)
+
+    Strategy (in order):
+      1. Search full name as-is (e.g. 'Manchester United')
+      2. If empty results, search first significant word (e.g. 'Bayern' from 'Bayern Munich')
+         — handles clubs whose BSD name differs (FC Bayern München vs Bayern Munich)
+      3. If still empty, search first two words
+    Fuzzy-matches the closest name from any results returned.
     """
-    data = bsd_get("/teams/", params={"name": name, "limit": 3})
-    if not data:
-        return None, None
-    results = data.get("results", [])
-    if not results:
-        return None, None
-    # Fuzzy-match the closest name
-    names_lower = [t["name"].lower() for t in results]
-    best = difflib.get_close_matches(name.lower(), names_lower, n=1, cutoff=0.35)
-    if best:
-        for t in results:
-            if t["name"].lower() == best[0]:
-                return t["id"], t["name"]
-    return results[0]["id"], results[0]["name"]
+    def _search_and_match(query: str) -> tuple[int | None, str | None]:
+        data = bsd_get("/teams/", params={"name": query, "limit": 5})
+        if not data:
+            return None, None
+        results = data.get("results", [])
+        if not results:
+            return None, None
+        names_lower = [t["name"].lower() for t in results]
+        # Try matching the ORIGINAL name (not the shortened query) against results
+        best = difflib.get_close_matches(name.lower(), names_lower, n=1, cutoff=0.30)
+        if best:
+            for t in results:
+                if t["name"].lower() == best[0]:
+                    return t["id"], t["name"]
+        # Fallback: return top result
+        return results[0]["id"], results[0]["name"]
+
+    # Strategy 1: full name
+    tid, bname = _search_and_match(name)
+    if tid:
+        return tid, bname
+
+    # Strategy 2: first significant word only
+    # Strip common prefixes like 'FC', 'AS', 'AC', 'SC', 'SV', 'VfB', 'RB'
+    words = [w for w in name.split() if w.upper() not in ("FC", "AS", "AC", "SC", "SV", "VFB", "RB", "CF")]
+    if words:
+        tid, bname = _search_and_match(words[0])
+        if tid:
+            return tid, bname
+
+    # Strategy 3: first two significant words
+    if len(words) >= 2:
+        tid, bname = _search_and_match(f"{words[0]} {words[1]}")
+        if tid:
+            return tid, bname
+
+    return None, None
 
 # ── Cache helpers (file-based, Railway persists /app volume) ─────────────────
 CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp/tactica_cache")
