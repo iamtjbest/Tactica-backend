@@ -22,10 +22,12 @@ from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
 router   = APIRouter()
 FORM_TTL = 3600   # 1 hour
 
-# Fixed window start — covers end of 2025-26 season.
-# Change this to the new season start date (e.g. 2026-08-01) when clubs
-# resume in August 2026.
-SEASON_START = "2026-03-01T00:00:00Z"
+# Window covers the full 2025-26 season (Aug 2025 → end June 2026).
+# The previous value of 2026-03-01 was too narrow — it excluded all Jan/Feb
+# fixtures and left teams with empty or 1-2 match form, forcing the fallback
+# att=80, def=80 and killing any meaningful probability output.
+# Update to 2026-08-01 when the 2026-27 season begins.
+SEASON_START = "2025-08-01T00:00:00Z"
 
 
 def _dynamic_ratings(matches: list) -> tuple[int, int]:
