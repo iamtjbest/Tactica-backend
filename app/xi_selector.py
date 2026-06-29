@@ -13,7 +13,7 @@ def load_players() -> dict:
         return {}
 
 # Wide attacker specs — these players fill FW slots in wide formations
-WIDE_ATT = {"RM","LM","RW","LW","RWF","LWF","AM","CAM","SS","WF"}
+WIDE_ATT = {"RM","LM","RW","LW","RWF","LWF","SS","WF"}
 
 def get_pos(generic: str, specific: str) -> str:
     if specific:
