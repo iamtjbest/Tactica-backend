@@ -191,8 +191,19 @@ def resolve_nation_bsd_id(nation: dict) -> tuple[int | None, str]:
 def score_player(p: dict, for_attack: bool) -> float:
     """
     Scores one player using BSD's confirmed available fields.
-    for_attack=True  → use attacker formula (caps 35%, goals 35%, age 30%)
-    for_attack=False → use defender formula (caps 55%, age 25%, goals 20%)
+    for_attack=True  → caps 25%, goals 25%, goal-rate 25%, age 25%
+    for_attack=False → caps 55%, age 25%, goals 20%  (unchanged — tenure
+                        and positioning matter more than goal output for DF/GK)
+
+    FIX: the old attacker formula (caps 35% + goals 35% + age 30%) let
+    high-caps veterans with modest goal counts (e.g. a 34yo DM with 9 goals
+    in 86 caps) outscore young in-form attackers with fewer total caps but a
+    much higher goals-per-cap rate (e.g. a 25yo winger with 9 goals in 49
+    caps — double the scoring rate). Goals were capped at a flat 30, which
+    swallowed the difference between "9 goals in 86 games" and "9 goals in
+    49 games" entirely. Added goal_rate_score, which directly rewards
+    scoring/assisting frequency rather than just the raw total, so genuine
+    attacking output is no longer diluted by tenure.
     """
     caps  = int(p.get("caps",  0) or 0)
     goals = int(p.get("goals", 0) or 0)
@@ -208,8 +219,16 @@ def score_player(p: dict, for_attack: bool) -> float:
     # Sub-scores 0-100
     caps_score = min(caps, 100)
 
-    goals_cap  = 30 if for_attack else 10
+    goals_cap   = 30 if for_attack else 10
     goals_score = min((goals / goals_cap) * 100, 100)
+
+    # Goal-involvement RATE (goals per cap) — rewards attacking output
+    # relative to appearances, not just raw tenure. A player who scores
+    # frequently in fewer caps should not be outranked by a low-output
+    # veteran purely because they've played more games.
+    goal_rate = (goals / caps) if caps > 0 else 0.0
+    # Typical elite forward goal rate is ~0.4-0.6 per cap; scale to 0-100
+    goal_rate_score = min(goal_rate / 0.5 * 100, 100)
 
     if   age < 20: age_score = 50
     elif age < 23: age_score = 65 + (age - 20) * 5
@@ -220,9 +239,10 @@ def score_player(p: dict, for_attack: bool) -> float:
     else:           age_score = 55
 
     if for_attack:
-        raw = caps_score * 0.35 + goals_score * 0.35 + age_score * 0.30
+        raw = (caps_score * 0.25 + goals_score * 0.25
+               + goal_rate_score * 0.25 + age_score * 0.25)
     else:
-        raw = caps_score * 0.55 + age_score   * 0.25 + goals_score * 0.20
+        raw = caps_score * 0.55 + age_score * 0.25 + goals_score * 0.20
 
     # CONFIRMED FIX: use full country name e.g. "England", not code "ENG"
     lw = league_weight(p.get("club_country", ""))
@@ -481,10 +501,35 @@ def nations_lineup(body: dict):
     # Step 2 — DF
     take(by_pos["DF"], slots["DF"], "DF")
 
-    # Step 3 — FW slots from COMBINED FW+MF pool (highest score first)
-    # This is the winger fix: Musiala/Wirtz can end up here in a 4-3-3
-    fw_mf_combined = sorted(by_pos["FW"] + by_pos["MF"], key=lambda p: p["score"], reverse=True)
-    fw_shortfall = take(fw_mf_combined, slots["FW"], "FW")
+    # Step 3 — FW slots: prioritise TRUE forwards first, only reach into the MF
+    # pool if there aren't enough out-and-out strikers/wingers to fill the slots.
+    #
+    # BUG (fixed): the old code merged FW+MF into one pool and sorted by raw
+    # score before taking. score_player() weights caps(35%) + goals(35%) +
+    # age(30%) — it has no signal that separates a destroyer-DM from a
+    # creative winger once both are tagged "MF" by BSD. A 34-year-old with
+    # 86 caps (e.g. Casemiro) will always outscore a 25-year-old with 49 caps
+    # (e.g. Vinícius Júnior) on caps_score + age_score alone, regardless of
+    # actual attacking output. Result: defensive mids displaced genuine
+    # forwards from the front line.
+    #
+    # Fix: fill FW slots from the FW-tagged pool first (sorted by score).
+    # Only fall through to MF-tagged players (sorted by score) if the FW
+    # pool runs out — this is the genuine "winger tagged as MF" case
+    # (Musiala, Wirtz, Sané-type players), not a "high-scoring DM" case.
+    fw_pool = sorted(by_pos["FW"], key=lambda p: p["score"], reverse=True)
+    fw_shortfall = take(fw_pool, slots["FW"], "FW")
+
+    if fw_shortfall > 0:
+        # Not enough true forwards — reach into MF pool for the highest-scored
+        # remaining midfielders (this is where attacking wingers tagged MF
+        # by BSD get pulled forward; defensive mids are no longer guaranteed
+        # to win this slot just by having a higher raw score).
+        mf_overflow = sorted(
+            [p for p in by_pos["MF"] if p["name"] not in used],
+            key=lambda p: p["score"], reverse=True
+        )
+        fw_shortfall = take(mf_overflow, fw_shortfall, "FW")
 
     # Step 4 — MF slots from MF NOT already placed in FW slots
     remaining_mf = [p for p in by_pos["MF"] if p["name"] not in used]
