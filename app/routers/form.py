@@ -22,12 +22,15 @@ from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
 router   = APIRouter()
 FORM_TTL = 3600   # 1 hour
 
-# Window covers the full 2025-26 season (Aug 2025 → end June 2026).
-# The previous value of 2026-03-01 was too narrow — it excluded all Jan/Feb
-# fixtures and left teams with empty or 1-2 match form, forcing the fallback
-# att=80, def=80 and killing any meaningful probability output.
-# Update to 2026-08-01 when the 2026-27 season begins.
+# Window covers the full 2025-26 season so ratings (attack/defence) reflect
+# the whole season's form. limit=50 ensures BSD returns enough fixtures that
+# after sorting DESC we reliably hit the 5 most recent regardless of how many
+# games a team has played since August.
+# NOTE: BSD returns fixtures ASCENDING by default — we sort DESC in Python.
+# With limit=20 and a wide window, BSD returned the oldest 20 (Aug-Nov) and
+# the most recent May fixtures were never fetched. Raising to 50 fixes this.
 SEASON_START = "2025-08-01T00:00:00Z"
+FORM_LIMIT   = 50
 
 
 def _dynamic_ratings(matches: list) -> tuple[int, int]:
@@ -61,7 +64,7 @@ def _fixture_date(fix: dict) -> str:
 
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
-    cache_key = f"form__{team.lower().replace(' ', '_')}"
+    cache_key = f"form_v2__{team.lower().replace(' ', '_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FORM_TTL:
         cached["cached"] = True
@@ -72,14 +75,15 @@ def form(team: str = Query(..., description="Team name")):
     if not team_id:
         raise HTTPException(status_code=404, detail=f"Team '{team}' not found in BSD.")
 
-    # Window: March 1 2026 → now
-    # Fetch 20, sort by date DESC in Python, slice to 5 most recent.
-    # Never trust BSD's default ordering — confirmed ascending by default.
+    # Window: Aug 2025 → now. Fetch 50 (limit raised from 20 — a 10-month window
+    # contains ~40-50 fixtures; limit=20 only returned the oldest 20 ascending
+    # from BSD, meaning May matches were never fetched). Sort DESC in Python,
+    # slice to 5 most recent. Never trust BSD default order (confirmed ascending).
     date_to = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
 
     data = bsd_get(f"/teams/{team_id}/fixtures/", params={
         "status":    "finished",
-        "limit":     20,
+        "limit":     FORM_LIMIT,
         "date_from": SEASON_START,
         "date_to":   date_to,
     })
