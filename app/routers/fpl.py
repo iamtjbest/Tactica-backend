@@ -18,6 +18,7 @@ uses goals conceded over last N matches — confirmed working.
 """
 import time
 from datetime import datetime, timezone
+from math import floor
 from fastapi import APIRouter, Query, HTTPException
 from app.config import bsd_get, bsd_find_team, cache_read, cache_write, cache_age
 from app.routers.form import _dynamic_ratings   # reuse confirmed helper
@@ -94,7 +95,7 @@ def fixture_ticker(
     Opponent defence rating is fetched from BSD form data.
     Results cached 1 hour per team.
     """
-    cache_key = f"fpl_fixtures_v1__{team.lower().replace(' ','_')}__{gws}"
+    cache_key = f"fpl_fixtures_v2__{team.lower().replace(' ','_')}__{gws}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
         cached["cached"] = True
@@ -108,7 +109,7 @@ def fixture_ticker(
     # 2. Fetch upcoming fixtures
     data = bsd_get(f"/teams/{team_id}/fixtures/", params={
         "status": "notstarted",
-        "limit":  gws + 5,   # fetch extra in case of cup games in the list
+        "limit":  min(gws + 10, 200),  # fetch extra for cup games, BSD max=200
     })
     if not data:
         raise HTTPException(502, "BSD fixture data unavailable.")
