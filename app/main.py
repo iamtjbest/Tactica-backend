@@ -18,7 +18,7 @@ Endpoints:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import predict, lineup, chat, live, squad, form, nations
+from app.routers import predict, lineup, chat, live, squad, form, nations, fpl_debug
 
 app = FastAPI(
     title="Tactica AI Engine",
@@ -42,13 +42,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(predict.router,  prefix="/api")
-app.include_router(lineup.router,   prefix="/api")
-app.include_router(chat.router,     prefix="/api")
-app.include_router(live.router,     prefix="/api")
-app.include_router(squad.router,    prefix="/api")
-app.include_router(form.router,     prefix="/api")
-app.include_router(nations.router,  prefix="/api")
+app.include_router(predict.router,    prefix="/api")
+app.include_router(lineup.router,     prefix="/api")
+app.include_router(chat.router,       prefix="/api")
+app.include_router(live.router,       prefix="/api")
+app.include_router(squad.router,      prefix="/api")
+app.include_router(form.router,       prefix="/api")
+app.include_router(nations.router,    prefix="/api")
+app.include_router(fpl_debug.router,  prefix="/api")  # TEMP — remove after BSD verification
 
 @app.get("/api/health")
 def health():
