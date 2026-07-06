@@ -106,15 +106,26 @@ def fixture_ticker(
     if not team_id:
         raise HTTPException(404, f"Team '{team}' not found in BSD. Try a slightly different spelling.")
 
-    # 2. Fetch upcoming fixtures
+    # Fetch upcoming fixtures — try notstarted first, fall back to all statuses
+    # (During World Cup break, clubs may have no "notstarted" fixtures in BSD yet)
     data = bsd_get(f"/teams/{team_id}/fixtures/", params={
         "status": "notstarted",
-        "limit":  min(gws + 10, 200),  # fetch extra for cup games, BSD max=200
+        "limit":  min(gws + 10, 200),
     })
-    if not data:
-        raise HTTPException(502, "BSD fixture data unavailable.")
+    raw = []
+    if data:
+        raw = data if isinstance(data, list) else data.get("results", [])
 
-    raw = data if isinstance(data, list) else data.get("results", [])
+    # If empty, try without status filter (returns all including future)
+    if not raw:
+        data = bsd_get(f"/teams/{team_id}/fixtures/", params={
+            "limit": min(gws + 10, 200),
+        })
+        if data:
+            all_fix = data if isinstance(data, list) else data.get("results", [])
+            now = datetime.now(timezone.utc).isoformat()
+            # Keep only future fixtures
+            raw = [f for f in all_fix if (f.get("event_date") or "") > now]
 
     # 3. Sort ascending by date, take first {gws}
     def _event_date(f):
