@@ -182,3 +182,213 @@ def fixture_ticker(
     }
     cache_write(cache_key, result)
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FPL Scout — Step 2: Captain Pick
+# GET /api/fpl/captain?team={name}
+#
+# Returns top 5 captain candidates from the team's attacking players, scored by:
+#   form_score = avg_goals*6 + avg_assists*3 + avg_shots_on_target*0.5
+#              + avg_rating*0.3
+# Weighted by next fixture FDR (easy fixture = bonus multiplier).
+# Only players who started (minutes_played >= 45) in last 5 games are scored.
+# ─────────────────────────────────────────────────────────────────────────────
+
+CAPTAIN_TTL = 1800   # 30 min — form can shift intra-day
+
+FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
+
+ATTACKING_POSITIONS = {"F", "FW", "M", "MF", "ST", "CF", "SS",
+                       "LW", "RW", "AM", "CAM", "LM", "RM",
+                       "10", "SS", "FW/MF", "MF/FW"}
+
+
+def _captain_score(stats: list[dict]) -> dict:
+    """
+    Score a player from their last N match stat dicts.
+    Only counts appearances where minutes_played >= 45.
+    Returns score + supporting averages.
+    """
+    started = [s for s in stats if (s.get("minutes_played") or 0) >= 45]
+    if not started:
+        return {"score": 0.0, "apps": 0, "avg_goals": 0,
+                "avg_assists": 0, "avg_shots": 0, "avg_rating": 0}
+
+    n = len(started)
+    avg_g   = sum(s.get("goals", 0) or 0          for s in started) / n
+    avg_a   = sum(s.get("goal_assist", 0) or 0    for s in started) / n
+    avg_sot = sum(s.get("shots_on_target", 0) or 0 for s in started) / n
+    avg_r   = sum(s.get("rating", 0) or 0         for s in started) / n
+
+    raw = avg_g * 6.0 + avg_a * 3.0 + avg_sot * 0.5 + avg_r * 0.3
+    return {
+        "score":       round(raw, 3),
+        "apps":        n,
+        "avg_goals":   round(avg_g,   2),
+        "avg_assists": round(avg_a,   2),
+        "avg_shots":   round(avg_sot, 2),
+        "avg_rating":  round(avg_r,   2),
+    }
+
+
+def _plain_reason(name: str, s: dict, fdr: int, fdr_label: str,
+                  opponent: str, venue: str) -> str:
+    """Generate a plain-English reason for the captain pick."""
+    parts = []
+    if s["avg_goals"] >= 0.5:
+        parts.append(f"averaging {s['avg_goals']:.1f} goals per game")
+    if s["avg_assists"] >= 0.4:
+        parts.append(f"{s['avg_assists']:.1f} assists per game")
+    if s["avg_shots"] >= 2.0:
+        parts.append(f"{s['avg_shots']:.1f} shots on target per game")
+    if s["avg_rating"] >= 7.5:
+        parts.append(f"rating {s['avg_rating']:.1f} recently")
+
+    form_str = ", ".join(parts) if parts else "decent recent form"
+    fix_str  = f"{fdr_label.lower()} fixture ({venue} vs {opponent}, FDR {fdr})"
+    return f"{form_str.capitalize()} · {fix_str}."
+
+
+@router.get("/fpl/captain")
+def captain_pick(
+    team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
+    top:  int = Query(5, description="Number of candidates to return", ge=1, le=10),
+):
+    """
+    Returns top attacking captain picks for the team, ranked by
+    form score weighted by next fixture difficulty.
+    """
+    cache_key = f"fpl_captain_v1__{team.lower().replace(' ','_')}"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < CAPTAIN_TTL:
+        cached["cached"] = True
+        return cached
+
+    # 1. Resolve team
+    team_id, bsd_name = bsd_find_team(team)
+    if not team_id:
+        raise HTTPException(404, f"Team '{team}' not found in BSD.")
+
+    # 2. Get squad — fetch direct from BSD so we have BSD player IDs
+    squad_data = bsd_get("/players/", params={"team_id": team_id, "limit": 100})
+    if not squad_data:
+        raise HTTPException(502, "Could not fetch squad from BSD.")
+
+    players_raw = squad_data if isinstance(squad_data, list) else squad_data.get("results", [])
+
+    # 3. Filter to attacking positions only (FW + MF)
+    attackers = []
+    for p in players_raw:
+        pos  = str(p.get("position", "") or "").strip().upper()
+        spec = str(p.get("specific_position", "") or "").strip().upper()
+        if pos in {"F", "FW", "M", "MF"} or spec in ATTACKING_POSITIONS:
+            attackers.append(p)
+
+    if not attackers:
+        raise HTTPException(404, f"No attacking players found in {team}'s BSD squad.")
+
+    # 4. Get next fixture FDR for this team
+    next_fdr       = 3          # neutral default
+    next_opponent  = "Unknown"
+    next_venue     = "H"
+    next_date      = ""
+
+    fix_data = bsd_get(f"/teams/{team_id}/fixtures/", params={
+        "status": "notstarted", "limit": 3
+    })
+    if fix_data:
+        fix_list = fix_data if isinstance(fix_data, list) else fix_data.get("results", [])
+        if fix_list:
+            fix_list.sort(key=lambda f: (f.get("event_date") or ""))
+            nf = fix_list[0]
+            is_home   = nf.get("home_team_id") == team_id
+            opp_id    = nf.get("away_team_id" if is_home else "home_team_id")
+            opp_name  = nf.get("away_team"    if is_home else "home_team", "Unknown")
+            opp_def   = _get_opponent_defence(opp_id, opp_name)
+            next_fdr      = _fdr(opp_def, is_away=not is_home)
+            next_opponent = opp_name
+            next_venue    = "H" if is_home else "A"
+            try:
+                dt = datetime.fromisoformat(
+                    (nf.get("event_date") or "").replace("Z", "+00:00"))
+                next_date = dt.strftime("%-d %b")
+            except Exception:
+                next_date = (nf.get("event_date") or "")[:10]
+
+    fdr_mult = FDR_MULTIPLIER.get(next_fdr, 1.0)
+
+    # 5. Score each attacker from last 5 match stats
+    candidates = []
+    for p in attackers:
+        pid  = p.get("id")
+        name = p.get("name") or p.get("short_name") or "Unknown"
+        if not pid:
+            continue
+
+        stats_data = bsd_get(f"/players/{pid}/stats/", params={"limit": 5})
+        if not stats_data:
+            continue
+        stats_list = (stats_data if isinstance(stats_data, list)
+                      else stats_data.get("results", []))
+
+        s = _captain_score(stats_list)
+        if s["apps"] == 0:
+            continue
+
+        weighted = round(s["score"] * fdr_mult, 3)
+
+        candidates.append({
+            "name":          name,
+            "position":      p.get("specific_position") or p.get("position", ""),
+            "bsd_id":        pid,
+            "market_value":  p.get("market_value_eur"),
+            "form_score":    s["score"],
+            "weighted_score": weighted,
+            "apps_last5":    s["apps"],
+            "avg_goals":     s["avg_goals"],
+            "avg_assists":   s["avg_assists"],
+            "avg_shots_on_target": s["avg_shots"],
+            "avg_rating":    s["avg_rating"],
+            "next_fixture": {
+                "opponent": next_opponent,
+                "venue":    next_venue,
+                "date":     next_date,
+                "fdr":      next_fdr,
+                "fdr_label": _fdr_label(next_fdr),
+                "fdr_colour": _fdr_colour(next_fdr),
+                "multiplier": fdr_mult,
+            },
+            "reason": _plain_reason(
+                name, s, next_fdr, _fdr_label(next_fdr),
+                next_opponent, next_venue
+            ),
+        })
+
+    # 6. Sort by weighted score descending
+    candidates.sort(key=lambda c: c["weighted_score"], reverse=True)
+    top_picks = candidates[:top]
+
+    if not top_picks:
+        raise HTTPException(404,
+            f"No recent match data found for {team}'s attackers. "
+            "Squad stats may not be indexed for this team in BSD yet.")
+
+    # 7. Top pick recommendation
+    rec = top_picks[0]
+    recommendation = (
+        f"Captain {rec['name']} — {rec['reason']} "
+        f"Weighted score {rec['weighted_score']:.1f}."
+    )
+
+    result = {
+        "team":           team,
+        "bsd_name":       bsd_name,
+        "next_fixture":   top_picks[0]["next_fixture"] if top_picks else {},
+        "recommendation": recommendation,
+        "picks":          top_picks,
+        "cached":         False,
+        "_cached_at":     time.time(),
+    }
+    cache_write(cache_key, result)
+    return result
