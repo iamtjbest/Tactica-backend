@@ -88,14 +88,14 @@ def _get_opponent_defence(opp_id: int, opp_name: str) -> int:
 @router.get("/fpl/fixtures")
 def fixture_ticker(
     team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
-    gws:  int = Query(6,   description="Number of gameweeks to show (max 10)", ge=1, le=10),
+    gws:  int = Query(38, description="Number of gameweeks to show (max 50)", ge=1, le=50),
 ):
     """
     Returns next {gws} fixtures for the team with FDR for each.
     Opponent defence rating is fetched from BSD form data.
     Results cached 1 hour per team.
     """
-    cache_key = f"fpl_fixtures_v2__{team.lower().replace(' ','_')}__{gws}"
+    cache_key = f"fpl_fixtures_v3__{team.lower().replace(' ','_')}__{gws}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
         cached["cached"] = True
@@ -259,7 +259,7 @@ def captain_pick(
     Returns top attacking captain picks for the team, ranked by
     form score weighted by next fixture difficulty.
     """
-    cache_key = f"fpl_captain_v1__{team.lower().replace(' ','_')}"
+    cache_key = f"fpl_captain_v2__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < CAPTAIN_TTL:
         cached["cached"] = True
@@ -288,33 +288,42 @@ def captain_pick(
     if not attackers:
         raise HTTPException(404, f"No attacking players found in {team}'s BSD squad.")
 
-    # 4. Get next fixture FDR for this team
-    next_fdr       = 3          # neutral default
+    # 4. Get next fixture — try notstarted, fall back to all future dated fixtures
+    next_fdr       = 3
     next_opponent  = "Unknown"
     next_venue     = "H"
     next_date      = ""
 
-    fix_data = bsd_get(f"/teams/{team_id}/fixtures/", params={
-        "status": "notstarted", "limit": 3
-    })
-    if fix_data:
-        fix_list = fix_data if isinstance(fix_data, list) else fix_data.get("results", [])
-        if fix_list:
-            fix_list.sort(key=lambda f: (f.get("event_date") or ""))
-            nf = fix_list[0]
-            is_home   = nf.get("home_team_id") == team_id
-            opp_id    = nf.get("away_team_id" if is_home else "home_team_id")
-            opp_name  = nf.get("away_team"    if is_home else "home_team", "Unknown")
-            opp_def   = _get_opponent_defence(opp_id, opp_name)
-            next_fdr      = _fdr(opp_def, is_away=not is_home)
-            next_opponent = opp_name
-            next_venue    = "H" if is_home else "A"
-            try:
-                dt = datetime.fromisoformat(
-                    (nf.get("event_date") or "").replace("Z", "+00:00"))
-                next_date = dt.strftime("%-d %b")
-            except Exception:
-                next_date = (nf.get("event_date") or "")[:10]
+    def _fetch_next_fixture(tid: int):
+        # Try notstarted first
+        d = bsd_get(f"/teams/{tid}/fixtures/", params={"status": "notstarted", "limit": 5})
+        fixes = []
+        if d:
+            fixes = d if isinstance(d, list) else d.get("results", [])
+        # Fallback: all fixtures filtered to future dates
+        if not fixes:
+            d2 = bsd_get(f"/teams/{tid}/fixtures/", params={"limit": 50})
+            if d2:
+                now = datetime.now(timezone.utc).isoformat()
+                all_f = d2 if isinstance(d2, list) else d2.get("results", [])
+                fixes = [f for f in all_f if (f.get("event_date") or "") > now]
+        fixes.sort(key=lambda f: (f.get("event_date") or ""))
+        return fixes[0] if fixes else None
+
+    nf = _fetch_next_fixture(team_id)
+    if nf:
+        is_home      = nf.get("home_team_id") == team_id
+        opp_id       = nf.get("away_team_id" if is_home else "home_team_id")
+        next_opponent= nf.get("away_team"    if is_home else "home_team", "Unknown")
+        next_venue   = "H" if is_home else "A"
+        opp_def      = _get_opponent_defence(opp_id, next_opponent)
+        next_fdr     = _fdr(opp_def, is_away=not is_home)
+        try:
+            dt = datetime.fromisoformat(
+                (nf.get("event_date") or "").replace("Z", "+00:00"))
+            next_date = dt.strftime("%-d %b")
+        except Exception:
+            next_date = (nf.get("event_date") or "")[:10]
 
     fdr_mult = FDR_MULTIPLIER.get(next_fdr, 1.0)
 
