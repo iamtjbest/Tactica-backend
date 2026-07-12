@@ -519,3 +519,161 @@ def transfer_recommender(
     }
     cache_write(cache_key, result)
     return result
+
+
+# ── Step 4: Differential Finder ───────────────────────────────────────────────
+#
+# GET /api/fpl/differentials?position=FW&max_value=15&min_fdr_ease=2&limit=8
+#
+# The most shared content on FPL Twitter. Finds players that are:
+#   1. Low market value (proxy for low FPL ownership %)
+#   2. High recent form (goals, assists, shots)
+#   3. Easy next fixture (FDR 1 or 2)
+#
+# This is the "under-the-radar" pick — someone most managers haven't
+# transferred in yet, playing well, with an easy fixture coming.
+# A successful differential is worth double in FPL (you gain vs rivals
+# who don't have them). That's why this gets shared most on Twitter.
+#
+# Differential score = weighted_form_score × ease_bonus × value_bonus
+#   ease_bonus:  FDR1=1.4, FDR2=1.2, FDR3=1.0 (only shows FDR 1-3)
+#   value_bonus: (100 / market_value_m) → cheaper = bigger bonus
+#                capped at 3.0 to prevent 0-value players dominating
+
+DIFF_TTL = 1800  # 30 min
+
+EASE_BONUS = {1: 1.40, 2: 1.20, 3: 1.00}
+
+@router.get("/fpl/differentials")
+def differential_finder(
+    position:  str = Query("FW", description="FW, MF, or DF"),
+    max_value: int = Query(25,  description="Max market value in €m", ge=1, le=100),
+    limit:     int = Query(8,   description="Results to return", ge=3, le=20),
+):
+    """
+    Returns the best differential picks — low ownership proxy (market value),
+    strong recent form, easy next fixture. The FPL manager's secret weapon.
+    """
+    pos_upper = position.strip().upper()
+    if pos_upper not in {"FW", "MF", "DF"}:
+        raise HTTPException(400, "position must be FW, MF, or DF")
+
+    max_eur = max_value * 1_000_000
+
+    cache_key = f"fpl_diff_v1__{pos_upper}__{max_value}"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < DIFF_TTL:
+        cached["cached"] = True
+        return cached
+
+    all_candidates = []
+
+    for team_name in PL_TEAM_NAMES:
+        team_id, _ = bsd_find_team(team_name)
+        if not team_id:
+            continue
+
+        # Get next fixture — only proceed if FDR is 1, 2, or 3 (easy/medium)
+        nf  = _next_fixture(team_id)
+        fdr = nf.get("fdr", 3)
+        if fdr > 3:
+            # Hard fixture — not a differential this week
+            continue
+
+        ease = EASE_BONUS.get(fdr, 1.0)
+
+        # Fetch squad filtered by position
+        squad_data  = bsd_get("/players/", params={"team_id": team_id, "limit": 50})
+        players_raw = squad_data if isinstance(squad_data, list) else (squad_data or {}).get("results", [])
+
+        pos_players = [
+            p for p in players_raw
+            if str(p.get("position", "")).upper() == pos_upper
+        ]
+
+        # Low value filter — proxy for low FPL ownership
+        cheap = [
+            p for p in pos_players
+            if p.get("market_value_eur") is not None
+            and 0 < (p.get("market_value_eur") or 0) <= max_eur
+        ]
+
+        for p in cheap:
+            pid  = p.get("id")
+            name = p.get("name") or p.get("short_name") or "Unknown"
+            if not pid:
+                continue
+
+            s = _player_stats(pid)
+            if not s or s.get("apps", 0) == 0:
+                continue
+
+            mval   = p.get("market_value_eur") or 0
+            mval_m = mval / 1_000_000
+
+            # Differential score — rewards output + easy fixture + cheap price
+            value_bonus = min(100 / mval_m, 3.0) if mval_m > 0 else 1.0
+            diff_score  = round(s["score"] * ease * value_bonus, 3)
+
+            # Only include if showing actual attacking output
+            if s["score"] < 1.0:
+                continue
+
+            all_candidates.append({
+                "name":          name,
+                "team":          team_name,
+                "position":      p.get("specific_position") or p.get("position", ""),
+                "bsd_id":        pid,
+                "market_value":  mval,
+                "market_value_m": round(mval_m, 1),
+                "form_score":    s["score"],
+                "diff_score":    diff_score,
+                "weighted_score": round(s["score"] * FDR_MULTIPLIER.get(fdr, 1.0), 3),
+                "apps_last5":    s["apps"],
+                "avg_goals":     s["avg_goals"],
+                "avg_assists":   s["avg_assists"],
+                "avg_shots_on_target": s["avg_shots_on_target"],
+                "avg_rating":    s["avg_rating"],
+                "next_fixture":  nf,
+                "ownership_proxy": "Low",  # market value confirms this
+                "reason":        (
+                    f"{_reason(s, fdr, _fdr_label(fdr), nf.get('opponent','?'), nf.get('venue','H'))} "
+                    f"Low ownership proxy (€{mval_m:.0f}m) — ideal differential."
+                ),
+            })
+
+    # Sort by differential score
+    all_candidates.sort(key=lambda c: c["diff_score"], reverse=True)
+    top_picks = all_candidates[:limit]
+
+    if not top_picks:
+        raise HTTPException(404,
+            f"No differential {pos_upper}s found under €{max_value}m with easy fixtures. "
+            "Try raising the budget or check back when 2026/27 fixtures are confirmed in BSD.")
+
+    pos_label = {"FW": "Forward", "MF": "Midfielder", "DF": "Defender"}.get(pos_upper, "Player")
+
+    # Shareable tweet — this is gold for FPL Twitter
+    top3     = top_picks[:3]
+    top3_str = " · ".join(
+        f"{p['name']} ({p['team']}, FDR {p['next_fixture'].get('fdr','?')})" for p in top3
+    )
+    share_text = (
+        f"💡 FPL Differentials GW1 — {pos_label}s under €{max_value}m\n"
+        f"via @TacticaEngine · ranked by form + fixture + value\n\n"
+        f"🔥 {top3_str}\n\n"
+        f"Easy fixtures, low ownership, in form.\n"
+        f"Full list: app.tactica.com.ng/fpl #FPL #FPLDifferentials #FPLCommunity"
+    )
+
+    result = {
+        "position":    pos_upper,
+        "max_value_eur": max_eur,
+        "total_scanned": len(all_candidates),
+        "picks":       top_picks,
+        "share_text":  share_text,
+        "cached":      False,
+        "_cached_at":  time.time(),
+    }
+    cache_write(cache_key, result)
+    return result
