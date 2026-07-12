@@ -1,403 +1,521 @@
 """
-FPL Scout — Step 1: Fixture Ticker
-GET /api/fpl/fixtures?team={name}
+FPL Scout — Steps 1, 2, 3
+Fixture Ticker · Captain Pick · Transfer Recommender
 
-Returns the next 6 Premier League fixtures for a team with a
-Fixture Difficulty Rating (FDR) for each:
-  1-2 = Green  (easy)
-  3   = Amber  (medium)
-  4-5 = Red    (hard)
+Philosophy: outputs are designed to be SHAREABLE.
+Every endpoint returns a share_text field — a plain-English sentence
+the user can copy directly to Twitter.
 
-FDR formula (all data from BSD confirmed fields):
-  base     = opponent's defence rating from /api/form (0-99)
-  away_adj = +5 if this team is playing away (harder)
-  fdr      = 1 + floor((base + away_adj) / 21)  → clipped 1-5
-
-defence rating comes from _dynamic_ratings() in form.py which
-uses goals conceded over last N matches — confirmed working.
+BSD confirmed fields (from debug session):
+  /players/{id}/stats/ → goals, goal_assist, shots_on_target,
+                          rating, minutes_played
+  /events/?league_id=1 → Premier League fixtures
+  /teams/{id}/fixtures/ → team-specific fixtures
+  /players/?team_id=X  → squad with market_value_eur, position
 """
 import time
 from datetime import datetime, timezone
 from math import floor
 from fastapi import APIRouter, Query, HTTPException
 from app.config import bsd_get, bsd_find_team, cache_read, cache_write, cache_age
-from app.routers.form import _dynamic_ratings   # reuse confirmed helper
+from app.routers.form import _dynamic_ratings
 
-router  = APIRouter()
-FDR_TTL = 3600   # 1 hour — fixture list changes rarely intra-day
+router    = APIRouter()
+FDR_TTL   = 3600   # 1 hour
+CAP_TTL   = 1800   # 30 min
+TRANS_TTL = 3600   # 1 hour
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _fdr(defence: int, is_away: bool) -> int:
-    """
-    Convert opponent defence rating to 1-5 FDR.
-    Higher defence = harder to score = higher FDR.
-    Away games get +5 penalty on the base.
-    """
     base = defence + (5 if is_away else 0)
-    # Scale 0-104 → 1-5
-    fdr = 1 + int(base // 21)
-    return max(1, min(5, fdr))
+    return max(1, min(5, 1 + int(base // 21)))
 
 def _fdr_label(fdr: int) -> str:
-    if fdr <= 2: return "Easy"
-    if fdr == 3: return "Medium"
-    return "Hard"
+    return "Easy" if fdr <= 2 else ("Medium" if fdr == 3 else "Hard")
 
 def _fdr_colour(fdr: int) -> str:
-    if fdr <= 2: return "green"
-    if fdr == 3: return "amber"
-    return "red"
+    return "green" if fdr <= 2 else ("amber" if fdr == 3 else "red")
 
-def _get_opponent_defence(opp_id: int, opp_name: str) -> int:
-    """
-    Fetch opponent's defence rating using the form endpoint's
-    _dynamic_ratings helper. Falls back to 75 if unavailable.
-    """
+FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
+
+ATTACKING_POS = {"F","FW","M","MF","ST","CF","SS","LW","RW",
+                 "AM","CAM","LM","RM","FW/MF","MF/FW"}
+
+def _get_opponent_defence(opp_id: int) -> int:
+    """Opponent defence rating from their last 30 finished fixtures."""
     try:
-        date_to   = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        date_from = "2025-08-01T00:00:00Z"
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
-            "status":    "finished",
-            "limit":     30,
-            "date_from": date_from,
-            "date_to":   date_to,
+            "status": "finished", "limit": 30,
+            "date_from": "2025-08-01T00:00:00Z", "date_to": now,
         })
-        fixtures = []
-        if data:
-            raw = data if isinstance(data, list) else data.get("results", [])
-            for fix in raw:
-                is_home = fix.get("home_team_id") == opp_id
-                scored    = fix.get("home_score" if is_home else "away_score") or 0
-                conceded  = fix.get("away_score" if is_home else "home_score") or 0
-                fixtures.append({
-                    "scored":   scored,
-                    "conceded": conceded,
-                    "result":   "W" if scored > conceded else ("D" if scored == conceded else "L"),
-                    "formation": "",
-                })
-        if fixtures:
-            _, defence = _dynamic_ratings(fixtures)
+        if not data:
+            return 75
+        raw = data if isinstance(data, list) else data.get("results", [])
+        matches = []
+        for fix in raw:
+            is_home = fix.get("home_team_id") == opp_id
+            scored   = fix.get("home_score" if is_home else "away_score") or 0
+            conceded = fix.get("away_score" if is_home else "home_score") or 0
+            matches.append({"scored": scored, "conceded": conceded,
+                            "result": "W" if scored > conceded else
+                            ("D" if scored == conceded else "L"), "formation": ""})
+        if matches:
+            _, defence = _dynamic_ratings(matches)
             return defence
     except Exception:
         pass
-    return 75   # sensible neutral fallback
+    return 75
 
-# ── Endpoint ──────────────────────────────────────────────────────────────────
+def _next_fixture(team_id: int) -> dict:
+    """
+    Get next upcoming fixture for a team.
+    Key fix: uses date_from=today so BSD returns 2026/27 fixtures
+    instead of drowning in finished 2025/26 results.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Strategy 1: notstarted + date_from today
+    d = bsd_get(f"/teams/{team_id}/fixtures/", params={
+        "status": "notstarted", "limit": 5, "date_from": today,
+    })
+    fixes = []
+    if d:
+        fixes = d if isinstance(d, list) else d.get("results", [])
+
+    # Strategy 2: all fixtures from today (catches postponed/rescheduled)
+    if not fixes:
+        d2 = bsd_get(f"/teams/{team_id}/fixtures/", params={
+            "limit": 10, "date_from": today,
+        })
+        if d2:
+            fixes = d2 if isinstance(d2, list) else d2.get("results", [])
+
+    # Strategy 3: /events/ endpoint with team_id + date_from
+    if not fixes:
+        d3 = bsd_get("/events/", params={
+            "team_id": team_id, "date_from": today,
+            "status": "notstarted", "limit": 5,
+        })
+        if d3:
+            fixes = d3 if isinstance(d3, list) else d3.get("results", [])
+
+    if not fixes:
+        return {}
+
+    fixes.sort(key=lambda f: f.get("event_date") or "")
+    nf = fixes[0]
+
+    is_home      = nf.get("home_team_id") == team_id
+    opp_id       = nf.get("away_team_id" if is_home else "home_team_id") or 0
+    opp_name     = nf.get("away_team" if is_home else "home_team", "Unknown")
+    opp_def      = _get_opponent_defence(opp_id)
+    fdr          = _fdr(opp_def, is_away=not is_home)
+    try:
+        dt       = datetime.fromisoformat(
+            (nf.get("event_date") or "").replace("Z", "+00:00"))
+        date_str = dt.strftime("%-d %b")
+    except Exception:
+        date_str = (nf.get("event_date") or "")[:10]
+
+    return {
+        "opponent":    opp_name,
+        "venue":       "H" if is_home else "A",
+        "date":        date_str,
+        "fdr":         fdr,
+        "fdr_label":   _fdr_label(fdr),
+        "fdr_colour":  _fdr_colour(fdr),
+        "multiplier":  FDR_MULTIPLIER.get(fdr, 1.0),
+    }
+
+def _player_stats(pid: int) -> dict:
+    """Fetch last 5 match stats for a player, return scored averages."""
+    data = bsd_get(f"/players/{pid}/stats/", params={"limit": 5})
+    if not data:
+        return {}
+    stats = data if isinstance(data, list) else data.get("results", [])
+    started = [s for s in stats if (s.get("minutes_played") or 0) >= 45]
+    if not started:
+        return {}
+    n = len(started)
+    avg_g   = sum(s.get("goals", 0) or 0           for s in started) / n
+    avg_a   = sum(s.get("goal_assist", 0) or 0     for s in started) / n
+    avg_sot = sum(s.get("shots_on_target", 0) or 0 for s in started) / n
+    avg_r   = sum(s.get("rating", 0) or 0          for s in started) / n
+    score   = avg_g * 6 + avg_a * 3 + avg_sot * 0.5 + avg_r * 0.3
+    return {
+        "score": round(score, 3), "apps": n,
+        "avg_goals": round(avg_g, 2), "avg_assists": round(avg_a, 2),
+        "avg_shots_on_target": round(avg_sot, 2), "avg_rating": round(avg_r, 2),
+    }
+
+def _reason(s: dict, fdr: int, fdr_label: str, opp: str, venue: str) -> str:
+    parts = []
+    if s["avg_goals"] >= 0.5:
+        parts.append(f"{s['avg_goals']:.1f} goals/game")
+    if s["avg_assists"] >= 0.4:
+        parts.append(f"{s['avg_assists']:.1f} assists/game")
+    if s["avg_shots_on_target"] >= 2.0:
+        parts.append(f"{s['avg_shots_on_target']:.1f} SoT/game")
+    if s["avg_rating"] >= 7.5:
+        parts.append(f"rating {s['avg_rating']:.1f}")
+    form = ", ".join(parts) if parts else "decent recent form"
+    fix  = f"{fdr_label.lower()} fixture ({venue} vs {opp}, FDR {fdr})"
+    return f"{form.capitalize()} · {fix}."
+
+# ── Step 1: Fixture Ticker ────────────────────────────────────────────────────
 
 @router.get("/fpl/fixtures")
 def fixture_ticker(
     team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
-    gws:  int = Query(38, description="Number of gameweeks to show (max 50)", ge=1, le=50),
+    gws:  int = Query(38, description="Gameweeks to show", ge=1, le=50),
 ):
-    """
-    Returns next {gws} fixtures for the team with FDR for each.
-    Opponent defence rating is fetched from BSD form data.
-    Results cached 1 hour per team.
-    """
-    cache_key = f"fpl_fixtures_v3__{team.lower().replace(' ','_')}__{gws}"
+    cache_key = f"fpl_fixtures_v4__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
         cached["cached"] = True
         return cached
 
-    # 1. Resolve team
     team_id, bsd_name = bsd_find_team(team)
     if not team_id:
-        raise HTTPException(404, f"Team '{team}' not found in BSD. Try a slightly different spelling.")
+        raise HTTPException(404, f"Team '{team}' not found.")
 
-    # Fetch upcoming fixtures — try notstarted first, fall back to all statuses
-    # (During World Cup break, clubs may have no "notstarted" fixtures in BSD yet)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Try notstarted + date_from today first
     data = bsd_get(f"/teams/{team_id}/fixtures/", params={
-        "status": "notstarted",
-        "limit":  min(gws + 10, 200),
+        "status": "notstarted", "limit": min(gws + 10, 200),
+        "date_from": today,
     })
-    raw = []
-    if data:
-        raw = data if isinstance(data, list) else data.get("results", [])
+    raw = data if isinstance(data, list) else (data or {}).get("results", [])
 
-    # If empty, try without status filter (returns all including future)
+    # Fallback: all from today without status filter
     if not raw:
         data = bsd_get(f"/teams/{team_id}/fixtures/", params={
-            "limit": min(gws + 10, 200),
+            "limit": min(gws + 10, 200), "date_from": today,
         })
-        if data:
-            all_fix = data if isinstance(data, list) else data.get("results", [])
-            now = datetime.now(timezone.utc).isoformat()
-            # Keep only future fixtures
-            raw = [f for f in all_fix if (f.get("event_date") or "") > now]
+        raw = data if isinstance(data, list) else (data or {}).get("results", [])
 
-    # 3. Sort ascending by date, take first {gws}
-    def _event_date(f):
-        d = f.get("event_date", "") or ""
-        return d[:19]   # ISO prefix for sort
+    # Final fallback: /events/ endpoint
+    if not raw:
+        data = bsd_get("/events/", params={
+            "team_id": team_id, "date_from": today,
+            "status": "notstarted", "limit": min(gws + 10, 200),
+        })
+        raw = data if isinstance(data, list) else (data or {}).get("results", [])
 
-    raw.sort(key=_event_date)
+    if not raw:
+        raise HTTPException(404,
+            f"No upcoming fixtures found for '{team}'. "
+            "The 2026/27 schedule may not be indexed in BSD yet — check back in early August.")
+
+    raw.sort(key=lambda f: f.get("event_date") or "")
     upcoming = raw[:gws]
 
-    if not upcoming:
-        raise HTTPException(404, f"No upcoming fixtures found for '{team}'. Season may be between rounds.")
-
-    # 4. Build FDR for each fixture
     fixtures_out = []
     for fix in upcoming:
         is_home    = fix.get("home_team_id") == team_id
-        opp_id     = fix.get("away_team_id" if is_home else "home_team_id")
+        opp_id     = fix.get("away_team_id" if is_home else "home_team_id") or 0
         opp_name   = fix.get("away_team"    if is_home else "home_team", "Unknown")
         event_date = fix.get("event_date", "")
         round_num  = fix.get("round_number")
-
-        # Parse date for display
         try:
-            dt = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
-            date_display = dt.strftime("%-d %b")   # e.g. "9 Aug"
+            dt           = datetime.fromisoformat(event_date.replace("Z", "+00:00"))
+            date_display = dt.strftime("%-d %b")
         except Exception:
             date_display = event_date[:10]
-
-        # Get opponent defence
-        opp_defence = _get_opponent_defence(opp_id, opp_name)
-
-        fdr = _fdr(opp_defence, is_away=not is_home)
-
+        opp_def = _get_opponent_defence(opp_id)
+        fdr     = _fdr(opp_def, is_away=not is_home)
         fixtures_out.append({
-            "gameweek":       round_num,
-            "date":           date_display,
-            "date_iso":       event_date,
-            "opponent":       opp_name,
-            "venue":          "H" if is_home else "A",
-            "opp_defence":    opp_defence,
-            "fdr":            fdr,
-            "fdr_label":      _fdr_label(fdr),
-            "fdr_colour":     _fdr_colour(fdr),
+            "gameweek":    round_num,
+            "date":        date_display,
+            "date_iso":    event_date,
+            "opponent":    opp_name,
+            "venue":       "H" if is_home else "A",
+            "opp_defence": opp_def,
+            "fdr":         fdr,
+            "fdr_label":   _fdr_label(fdr),
+            "fdr_colour":  _fdr_colour(fdr),
         })
 
+    # Shareable text — this is what users post on Twitter
+    easy_count = sum(1 for f in fixtures_out if f["fdr_colour"] == "green")
+    hard_count = sum(1 for f in fixtures_out if f["fdr_colour"] == "red")
+    next_3     = fixtures_out[:3]
+    next_3_str = " · ".join(
+        f"{f['opponent']} ({f['fdr_label'][0]})" for f in next_3
+    )
+    if easy_count >= len(fixtures_out) * 0.6:
+        insight = f"🟢 Great fixture run ahead"
+    elif hard_count >= len(fixtures_out) * 0.6:
+        insight = f"🔴 Tough fixtures coming up"
+    else:
+        insight = f"Mixed fixtures ahead"
+    share_text = (
+        f"📅 {team} Fixture Ticker via @TacticaEngine\n"
+        f"Next 3: {next_3_str}\n"
+        f"{insight} — {easy_count} easy, {hard_count} hard in next {len(fixtures_out)} GWs\n"
+        f"Full analysis: app.tactica.com.ng/fpl #FPL #FPL{datetime.now().year}{datetime.now().year+1}"
+    )
+
     result = {
-        "team":        team,
-        "bsd_name":    bsd_name,
-        "team_id":     team_id,
-        "fixtures":    fixtures_out,
-        "generated":   datetime.now(timezone.utc).isoformat(),
-        "cached":      False,
-        "_cached_at":  time.time(),
+        "team": team, "bsd_name": bsd_name, "team_id": team_id,
+        "fixtures": fixtures_out,
+        "share_text": share_text,
+        "generated": datetime.now(timezone.utc).isoformat(),
+        "cached": False, "_cached_at": time.time(),
     }
     cache_write(cache_key, result)
     return result
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FPL Scout — Step 2: Captain Pick
-# GET /api/fpl/captain?team={name}
-#
-# Returns top 5 captain candidates from the team's attacking players, scored by:
-#   form_score = avg_goals*6 + avg_assists*3 + avg_shots_on_target*0.5
-#              + avg_rating*0.3
-# Weighted by next fixture FDR (easy fixture = bonus multiplier).
-# Only players who started (minutes_played >= 45) in last 5 games are scored.
-# ─────────────────────────────────────────────────────────────────────────────
-
-CAPTAIN_TTL = 1800   # 30 min — form can shift intra-day
-
-FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
-
-ATTACKING_POSITIONS = {"F", "FW", "M", "MF", "ST", "CF", "SS",
-                       "LW", "RW", "AM", "CAM", "LM", "RM",
-                       "10", "SS", "FW/MF", "MF/FW"}
-
-
-def _captain_score(stats: list[dict]) -> dict:
-    """
-    Score a player from their last N match stat dicts.
-    Only counts appearances where minutes_played >= 45.
-    Returns score + supporting averages.
-    """
-    started = [s for s in stats if (s.get("minutes_played") or 0) >= 45]
-    if not started:
-        return {"score": 0.0, "apps": 0, "avg_goals": 0,
-                "avg_assists": 0, "avg_shots": 0, "avg_rating": 0}
-
-    n = len(started)
-    avg_g   = sum(s.get("goals", 0) or 0          for s in started) / n
-    avg_a   = sum(s.get("goal_assist", 0) or 0    for s in started) / n
-    avg_sot = sum(s.get("shots_on_target", 0) or 0 for s in started) / n
-    avg_r   = sum(s.get("rating", 0) or 0         for s in started) / n
-
-    raw = avg_g * 6.0 + avg_a * 3.0 + avg_sot * 0.5 + avg_r * 0.3
-    return {
-        "score":       round(raw, 3),
-        "apps":        n,
-        "avg_goals":   round(avg_g,   2),
-        "avg_assists": round(avg_a,   2),
-        "avg_shots":   round(avg_sot, 2),
-        "avg_rating":  round(avg_r,   2),
-    }
-
-
-def _plain_reason(name: str, s: dict, fdr: int, fdr_label: str,
-                  opponent: str, venue: str) -> str:
-    """Generate a plain-English reason for the captain pick."""
-    parts = []
-    if s["avg_goals"] >= 0.5:
-        parts.append(f"averaging {s['avg_goals']:.1f} goals per game")
-    if s["avg_assists"] >= 0.4:
-        parts.append(f"{s['avg_assists']:.1f} assists per game")
-    if s["avg_shots"] >= 2.0:
-        parts.append(f"{s['avg_shots']:.1f} shots on target per game")
-    if s["avg_rating"] >= 7.5:
-        parts.append(f"rating {s['avg_rating']:.1f} recently")
-
-    form_str = ", ".join(parts) if parts else "decent recent form"
-    fix_str  = f"{fdr_label.lower()} fixture ({venue} vs {opponent}, FDR {fdr})"
-    return f"{form_str.capitalize()} · {fix_str}."
-
+# ── Step 2: Captain Pick ──────────────────────────────────────────────────────
 
 @router.get("/fpl/captain")
 def captain_pick(
-    team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
-    top:  int = Query(5, description="Number of candidates to return", ge=1, le=10),
+    team: str = Query(..., description="Club name"),
+    top:  int = Query(5, ge=1, le=10),
 ):
-    """
-    Returns top attacking captain picks for the team, ranked by
-    form score weighted by next fixture difficulty.
-    """
-    cache_key = f"fpl_captain_v2__{team.lower().replace(' ','_')}"
+    cache_key = f"fpl_captain_v3__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
-    if cached and cache_age(cached) < CAPTAIN_TTL:
+    if cached and cache_age(cached) < CAP_TTL:
         cached["cached"] = True
         return cached
 
-    # 1. Resolve team
     team_id, bsd_name = bsd_find_team(team)
     if not team_id:
-        raise HTTPException(404, f"Team '{team}' not found in BSD.")
+        raise HTTPException(404, f"Team '{team}' not found.")
 
-    # 2. Get squad — fetch direct from BSD so we have BSD player IDs
-    squad_data = bsd_get("/players/", params={"team_id": team_id, "limit": 100})
-    if not squad_data:
-        raise HTTPException(502, "Could not fetch squad from BSD.")
-
-    players_raw = squad_data if isinstance(squad_data, list) else squad_data.get("results", [])
-
-    # 3. Filter to attacking positions only (FW + MF)
-    attackers = []
-    for p in players_raw:
-        pos  = str(p.get("position", "") or "").strip().upper()
-        spec = str(p.get("specific_position", "") or "").strip().upper()
-        if pos in {"F", "FW", "M", "MF"} or spec in ATTACKING_POSITIONS:
-            attackers.append(p)
+    squad_data   = bsd_get("/players/", params={"team_id": team_id, "limit": 100})
+    players_raw  = squad_data if isinstance(squad_data, list) else (squad_data or {}).get("results", [])
+    attackers    = [p for p in players_raw
+                   if str(p.get("position","")).upper() in {"F","FW","M","MF"}
+                   or str(p.get("specific_position","")).upper() in ATTACKING_POS]
 
     if not attackers:
-        raise HTTPException(404, f"No attacking players found in {team}'s BSD squad.")
+        raise HTTPException(404, f"No attacking players found for {team}.")
 
-    # 4. Get next fixture — try notstarted, fall back to all future dated fixtures
-    next_fdr       = 3
-    next_opponent  = "Unknown"
-    next_venue     = "H"
-    next_date      = ""
+    nf       = _next_fixture(team_id)
+    fdr      = nf.get("fdr", 3)
+    fdr_mult = FDR_MULTIPLIER.get(fdr, 1.0)
 
-    def _fetch_next_fixture(tid: int):
-        # Try notstarted first
-        d = bsd_get(f"/teams/{tid}/fixtures/", params={"status": "notstarted", "limit": 5})
-        fixes = []
-        if d:
-            fixes = d if isinstance(d, list) else d.get("results", [])
-        # Fallback: all fixtures filtered to future dates
-        if not fixes:
-            d2 = bsd_get(f"/teams/{tid}/fixtures/", params={"limit": 50})
-            if d2:
-                now = datetime.now(timezone.utc).isoformat()
-                all_f = d2 if isinstance(d2, list) else d2.get("results", [])
-                fixes = [f for f in all_f if (f.get("event_date") or "") > now]
-        fixes.sort(key=lambda f: (f.get("event_date") or ""))
-        return fixes[0] if fixes else None
-
-    nf = _fetch_next_fixture(team_id)
-    if nf:
-        is_home      = nf.get("home_team_id") == team_id
-        opp_id       = nf.get("away_team_id" if is_home else "home_team_id")
-        next_opponent= nf.get("away_team"    if is_home else "home_team", "Unknown")
-        next_venue   = "H" if is_home else "A"
-        opp_def      = _get_opponent_defence(opp_id, next_opponent)
-        next_fdr     = _fdr(opp_def, is_away=not is_home)
-        try:
-            dt = datetime.fromisoformat(
-                (nf.get("event_date") or "").replace("Z", "+00:00"))
-            next_date = dt.strftime("%-d %b")
-        except Exception:
-            next_date = (nf.get("event_date") or "")[:10]
-
-    fdr_mult = FDR_MULTIPLIER.get(next_fdr, 1.0)
-
-    # 5. Score each attacker from last 5 match stats
     candidates = []
     for p in attackers:
         pid  = p.get("id")
         name = p.get("name") or p.get("short_name") or "Unknown"
         if not pid:
             continue
-
-        stats_data = bsd_get(f"/players/{pid}/stats/", params={"limit": 5})
-        if not stats_data:
+        s = _player_stats(pid)
+        if not s or s.get("apps", 0) == 0:
             continue
-        stats_list = (stats_data if isinstance(stats_data, list)
-                      else stats_data.get("results", []))
-
-        s = _captain_score(stats_list)
-        if s["apps"] == 0:
-            continue
-
-        weighted = round(s["score"] * fdr_mult, 3)
-
         candidates.append({
             "name":          name,
-            "position":      p.get("specific_position") or p.get("position", ""),
+            "position":      p.get("specific_position") or p.get("position",""),
             "bsd_id":        pid,
             "market_value":  p.get("market_value_eur"),
             "form_score":    s["score"],
-            "weighted_score": weighted,
+            "weighted_score": round(s["score"] * fdr_mult, 3),
             "apps_last5":    s["apps"],
             "avg_goals":     s["avg_goals"],
             "avg_assists":   s["avg_assists"],
-            "avg_shots_on_target": s["avg_shots"],
+            "avg_shots_on_target": s["avg_shots_on_target"],
             "avg_rating":    s["avg_rating"],
-            "next_fixture": {
-                "opponent": next_opponent,
-                "venue":    next_venue,
-                "date":     next_date,
-                "fdr":      next_fdr,
-                "fdr_label": _fdr_label(next_fdr),
-                "fdr_colour": _fdr_colour(next_fdr),
-                "multiplier": fdr_mult,
-            },
-            "reason": _plain_reason(
-                name, s, next_fdr, _fdr_label(next_fdr),
-                next_opponent, next_venue
-            ),
+            "next_fixture":  nf,
+            "reason":        _reason(s, fdr, _fdr_label(fdr),
+                                     nf.get("opponent","Unknown"),
+                                     nf.get("venue","H")),
         })
 
-    # 6. Sort by weighted score descending
     candidates.sort(key=lambda c: c["weighted_score"], reverse=True)
-    top_picks = candidates[:top]
+    picks = candidates[:top]
 
-    if not top_picks:
-        raise HTTPException(404,
-            f"No recent match data found for {team}'s attackers. "
-            "Squad stats may not be indexed for this team in BSD yet.")
+    if not picks:
+        raise HTTPException(404, f"No recent stats for {team}'s attackers in BSD.")
 
-    # 7. Top pick recommendation
-    rec = top_picks[0]
-    recommendation = (
-        f"Captain {rec['name']} — {rec['reason']} "
-        f"Weighted score {rec['weighted_score']:.1f}."
+    rec  = picks[0]
+    share_text = (
+        f"🎯 My FPL captain this GW: {rec['name']} ({team})\n"
+        f"{rec['avg_goals']:.1f} goals/game · {rec['avg_shots_on_target']:.1f} SoT/game\n"
+        f"Next: {nf.get('venue','H')} vs {nf.get('opponent','?')} "
+        f"(FDR {fdr} — {_fdr_label(fdr)})\n"
+        f"via @TacticaEngine · app.tactica.com.ng/fpl #FPL"
     )
 
     result = {
-        "team":           team,
-        "bsd_name":       bsd_name,
-        "next_fixture":   top_picks[0]["next_fixture"] if top_picks else {},
-        "recommendation": recommendation,
-        "picks":          top_picks,
-        "cached":         False,
-        "_cached_at":     time.time(),
+        "team": team, "bsd_name": bsd_name,
+        "next_fixture": nf,
+        "recommendation": (
+            f"Captain {rec['name']} — {rec['reason']} "
+            f"Weighted score {rec['weighted_score']:.1f}."
+        ),
+        "picks": picks,
+        "share_text": share_text,
+        "cached": False, "_cached_at": time.time(),
+    }
+    cache_write(cache_key, result)
+    return result
+
+
+# ── Step 3: Transfer Recommender ──────────────────────────────────────────────
+#
+# GET /api/fpl/transfers?position=FW&budget=100&limit=10
+#
+# Finds the best value attackers/midfielders across ALL Premier League
+# teams by combining:
+#   - recent form score (goals × 6 + assists × 3 + SoT × 0.5 + rating × 0.3)
+#   - next fixture FDR multiplier
+#   - market value as FPL price proxy (lower = better value pick)
+#
+# Returns a ranked shortlist with a value_score that rewards
+# high output relative to price — exactly how FPL managers think.
+
+PL_TEAM_NAMES = [
+    "Arsenal","Aston Villa","Bournemouth","Brentford","Brighton",
+    "Chelsea","Crystal Palace","Everton","Fulham","Ipswich",
+    "Leicester City","Liverpool","Manchester City","Manchester United",
+    "Newcastle United","Nottingham Forest","Southampton",
+    "Tottenham Hotspur","West Ham United","Wolverhampton","Sunderland",
+]
+
+# Max budget in €m for filtering (FPL prices roughly = market_value / 10M)
+# A budget of 100 = no filter (show all)
+
+@router.get("/fpl/transfers")
+def transfer_recommender(
+    position: str = Query("FW", description="FW = forwards, MF = midfielders, DF = defenders"),
+    budget:   int = Query(100, description="Max market value in €m (default 100 = all)", ge=5, le=200),
+    teams:    str = Query("", description="Comma-separated teams to search (empty = all PL)"),
+    limit:    int = Query(10, description="Results to return", ge=3, le=25),
+):
+    """
+    Returns the best transfer targets for the given position and budget,
+    ranked by value_score = (weighted_form_score / market_value_m).
+    """
+    pos_upper = position.strip().upper()
+    if pos_upper not in {"FW", "MF", "DF", "GK"}:
+        raise HTTPException(400, "position must be FW, MF, DF, or GK")
+
+    budget_eur = budget * 1_000_000
+
+    cache_key = f"fpl_transfers_v1__{pos_upper}__{budget}__{teams}"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < TRANS_TTL:
+        cached["cached"] = True
+        return cached
+
+    # Which teams to search
+    search_teams = [t.strip() for t in teams.split(",") if t.strip()] if teams else PL_TEAM_NAMES
+
+    all_candidates = []
+
+    for team_name in search_teams:
+        team_id, bsd_name = bsd_find_team(team_name)
+        if not team_id:
+            continue
+
+        # Fetch squad
+        squad_data  = bsd_get("/players/", params={"team_id": team_id, "limit": 50})
+        players_raw = squad_data if isinstance(squad_data, list) else (squad_data or {}).get("results", [])
+
+        # Filter by position
+        pos_players = [
+            p for p in players_raw
+            if str(p.get("position", "")).upper() == pos_upper
+            or str(p.get("specific_position","")).upper() in {
+                pos_upper, "ST","CF","SS","LW","RW"  # FW variants
+            }
+        ]
+
+        # Budget filter
+        if budget_eur < 100_000_000:   # only filter if budget is set below 100m
+            pos_players = [
+                p for p in pos_players
+                if not p.get("market_value_eur")
+                or (p.get("market_value_eur") or 0) <= budget_eur
+            ]
+
+        if not pos_players:
+            continue
+
+        # Get next fixture for this team
+        nf       = _next_fixture(team_id)
+        fdr      = nf.get("fdr", 3)
+        fdr_mult = FDR_MULTIPLIER.get(fdr, 1.0)
+
+        # Score each player
+        for p in pos_players:
+            pid  = p.get("id")
+            name = p.get("name") or p.get("short_name") or "Unknown"
+            if not pid:
+                continue
+
+            s = _player_stats(pid)
+            if not s or s.get("apps", 0) == 0:
+                continue
+
+            weighted  = round(s["score"] * fdr_mult, 3)
+            mval      = p.get("market_value_eur") or 0
+            mval_m    = mval / 1_000_000 if mval else 0
+
+            # Value score: output relative to price
+            # Players with no market value get a moderate neutral score
+            if mval_m > 0:
+                value_score = round(weighted / mval_m * 10, 3)
+            else:
+                value_score = round(weighted * 0.5, 3)
+
+            all_candidates.append({
+                "name":          name,
+                "team":          team_name,
+                "position":      p.get("specific_position") or p.get("position",""),
+                "bsd_id":        pid,
+                "market_value":  mval,
+                "market_value_m": round(mval_m, 1),
+                "form_score":    s["score"],
+                "weighted_score": weighted,
+                "value_score":   value_score,
+                "apps_last5":    s["apps"],
+                "avg_goals":     s["avg_goals"],
+                "avg_assists":   s["avg_assists"],
+                "avg_shots_on_target": s["avg_shots_on_target"],
+                "avg_rating":    s["avg_rating"],
+                "next_fixture":  nf,
+                "reason":        _reason(s, fdr, _fdr_label(fdr),
+                                         nf.get("opponent","Unknown"),
+                                         nf.get("venue","H")),
+            })
+
+    # Sort by value_score descending
+    all_candidates.sort(key=lambda c: c["value_score"], reverse=True)
+    top_picks = all_candidates[:limit]
+
+    if not top_picks:
+        raise HTTPException(404,
+            f"No {pos_upper} transfer targets found. "
+            "BSD may not have 2026/27 squad data indexed yet — check back in early August.")
+
+    # Shareable output
+    pos_label = {"FW":"Forward","MF":"Midfielder","DF":"Defender","GK":"Goalkeeper"}.get(pos_upper,"Player")
+    top3      = top_picks[:3]
+    top3_str  = " · ".join(
+        f"{p['name']} ({p['team']}, €{p['market_value_m']}m)" for p in top3
+    )
+    share_text = (
+        f"🔄 Top FPL {pos_label} transfers via @TacticaEngine\n"
+        f"Budget: €{budget}m · Ranked by form + fixture value\n"
+        f"1⃣ {top3_str[:200]}\n"
+        f"Full list: app.tactica.com.ng/fpl #FPL #FPLTransfers"
+    )
+
+    result = {
+        "position":    pos_upper,
+        "budget_eur":  budget_eur,
+        "total_found": len(all_candidates),
+        "picks":       top_picks,
+        "share_text":  share_text,
+        "cached":      False,
+        "_cached_at":  time.time(),
     }
     cache_write(cache_key, result)
     return result
