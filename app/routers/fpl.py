@@ -370,12 +370,15 @@ def captain_pick(
 # Returns a ranked shortlist with a value_score that rewards
 # high output relative to price — exactly how FPL managers think.
 
+# 2026/27 Premier League — confirmed 20 clubs
+# Relegated: Ipswich, Leicester City, Southampton
+# Promoted:  Sunderland, Leeds United, Burnley
 PL_TEAM_NAMES = [
     "Arsenal","Aston Villa","Bournemouth","Brentford","Brighton",
-    "Chelsea","Crystal Palace","Everton","Fulham","Ipswich",
-    "Leicester City","Liverpool","Manchester City","Manchester United",
-    "Newcastle United","Nottingham Forest","Southampton",
-    "Tottenham Hotspur","West Ham United","Wolverhampton","Sunderland",
+    "Burnley","Chelsea","Crystal Palace","Everton","Fulham",
+    "Leeds United","Liverpool","Manchester City","Manchester United",
+    "Newcastle United","Nottingham Forest","Sunderland",
+    "Tottenham Hotspur","West Ham United","Wolverhampton",
 ]
 
 # Max budget in €m for filtering (FPL prices roughly = market_value / 10M)
