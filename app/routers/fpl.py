@@ -68,9 +68,6 @@ POS_LABEL = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 # ── FPL data fetch ────────────────────────────────────────────────────────────
 
 def _get_fpl_data() -> dict:
-    """
-    Fetch and cache FPL bootstrap data.
-    """
     cache_key = "fpl_bootstrap_v1"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FPL_TTL:
@@ -97,29 +94,6 @@ def _get_fpl_data() -> dict:
 
 # ── BSD fixture helpers ───────────────────────────────────────────────────────
 
-def _is_pl(fix: dict) -> bool:
-    """Strictly blocks cups/friendlies and allows only pure Premier League."""
-    league_name = str(fix.get("league", "")).lower()
-    comp_name = str(fix.get("competition", "")).lower()
-    full_name = league_name + " " + comp_name
-    
-    # 1. The Blocklist: Kill anything that is a cup, friendly, or preseason series
-    rejects = ["cup", "friendly", "friendlies", "shield", "series", "summer", "champions", "europa", "conference", "trophy"]
-    if any(r in full_name for r in rejects):
-        return False
-        
-    # 2. The Allowlist: API-Sports ID 39 OR explicit "premier league" name
-    l_id = str(fix.get("league_id", ""))
-    c_id = str(fix.get("competition_id", ""))
-    
-    if l_id == "39" or c_id == "39":
-        return True
-        
-    if "premier league" in full_name:
-        return True
-        
-    return False
-
 def _fdr(defence: int, is_away: bool) -> int:
     """Maps 0-100 rating to standard FPL FDR (2 to 5)."""
     if defence < 35: fdr = 2      # Weak defence -> Easy (2)
@@ -144,9 +118,11 @@ EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 def _get_opponent_defence(opp_id: int) -> int:
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+        # Direct API-level filter for Premier League
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
             "status": "finished", "limit": 40,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
+            "league_id": 39
         })
         if not data:
             return 50  # Average baseline for missing data (yields FDR 3)
@@ -154,9 +130,6 @@ def _get_opponent_defence(opp_id: int) -> int:
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
         for fix in raw:
-            if not _is_pl(fix): 
-                continue
-                
             is_home  = fix.get("home_team_id") == opp_id
             scored   = fix.get("home_score" if is_home else "away_score")
             conceded = fix.get("away_score" if is_home else "home_score")
@@ -168,7 +141,6 @@ def _get_opponent_defence(opp_id: int) -> int:
         if matches:
             _, defence = _dynamic_ratings(matches)
             
-            # If dynamic_ratings passes an Elo score (e.g. 1200), map it safely down to 0-100
             if defence > 200:
                 defence = ((defence - 900) / 600) * 100
                 
@@ -180,19 +152,22 @@ def _get_opponent_defence(opp_id: int) -> int:
 def _next_fixture(bsd_team_id: int) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
+    
+    # Passing league_id directly to the API
     for params in [
-        {"status": "notstarted", "limit": 20, "date_from": today},
-        {"limit": 25, "date_from": today},
+        {"status": "notstarted", "limit": 10, "date_from": today, "league_id": 39},
+        {"limit": 15, "date_from": today, "league_id": 39},
     ]:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                pl_fixes = [x for x in f if _is_pl(x)]
-                fixes = pl_fixes if pl_fixes else f
+                fixes = f
                 break
+                
     if not fixes:
         return {}
+        
     fixes.sort(key=lambda f: f.get("event_date") or "")
     nf      = fixes[0]
     is_home = nf.get("home_team_id") == bsd_team_id
@@ -206,6 +181,7 @@ def _next_fixture(bsd_team_id: int) -> dict:
         date_str= dt.strftime("%-d %b")
     except Exception:
         date_str= (nf.get("event_date") or "")[:10]
+        
     return {
         "opponent": opp_name, "venue": "H" if is_home else "A",
         "date": date_str, "fdr": fdr,
@@ -288,10 +264,12 @@ def fixture_ticker(
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
+    
+    # Passing league_id directly to the API to pull only PL matches
     for params in [
-        {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today},
-        {"limit": min(gws+30, 200), "date_from": today},
-        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
+        {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today, "league_id": 39},
+        {"limit": min(gws+30, 200), "date_from": today, "league_id": 39},
+        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200), "league_id": 39},
     ]:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
@@ -303,10 +281,6 @@ def fixture_ticker(
 
     if not raw:
         raise HTTPException(404, f"No upcoming fixtures for '{team}'.")
-
-    # Strict isolation for Premier League matches utilizing the new blocklist
-    pl_matches = [fix for fix in raw if _is_pl(fix)]
-    raw = pl_matches if pl_matches else raw
 
     raw.sort(key=lambda f: f.get("event_date") or "")
     upcoming = raw[:gws]
