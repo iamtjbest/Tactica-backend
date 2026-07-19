@@ -116,17 +116,27 @@ FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
 EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 
 def _get_opponent_defence(opp_id: int) -> int:
+    """Calculates opponent defensive rating using strictly historical PL matches."""
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+        # Query with league_id to filter out cups at the API resource level
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
-            "status": "finished", "limit": 30,
+            "status": "finished", "limit": 40,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
+            "league_id": 39 
         })
         if not data:
             return 75
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
         for fix in raw:
+            # Code validation fallback to drop unauthorized competition formats
+            l_id = fix.get("league_id") or fix.get("competition_id")
+            league_str = str(fix.get("league", "")) + str(fix.get("competition", ""))
+            
+            if l_id != 39 and "Premier League" not in league_str and l_id is not None:
+                continue
+                
             is_home  = fix.get("home_team_id") == opp_id
             scored   = fix.get("home_score" if is_home else "away_score") or 0
             conceded = fix.get("away_score" if is_home else "home_score") or 0
@@ -141,19 +151,28 @@ def _get_opponent_defence(opp_id: int) -> int:
     return 75
 
 def _next_fixture(bsd_team_id: int) -> dict:
-    """Get next upcoming fixture using date_from=today."""
+    """Get next upcoming Premier League fixture using date_from=today."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
     for params in [
-        {"status": "notstarted", "limit": 5, "date_from": today},
-        {"limit": 10, "date_from": today},
+        {"status": "notstarted", "limit": 15, "date_from": today, "league_id": 39},
+        {"limit": 15, "date_from": today, "league_id": 39},
     ]:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                fixes = f
-                break
+                # Isolate target league records explicitly
+                fixes = [
+                    fix for fix in f 
+                    if fix.get("league_id") == 39 
+                    or str(fix.get("competition_id")) == "39"
+                    or "Premier League" in str(fix.get("league", ""))
+                    or "Premier League" in str(fix.get("competition", ""))
+                    or fix.get("round_number")
+                ]
+                if fixes:
+                    break
     if not fixes:
         return {}
     fixes.sort(key=lambda f: f.get("event_date") or "")
@@ -240,7 +259,7 @@ def _reason_fpl(player: dict, fdr: int, fdr_label: str, opp: str, venue: str) ->
     return f"{form_str.capitalize()} · {fix_str}."
 
 
-# ── Step 1: Fixture Ticker (BSD only — unchanged, works well) ─────────────────
+# ── Step 1: Fixture Ticker (Strict Premier League Isolation) ──────────────────
 
 @router.get("/fpl/fixtures")
 def fixture_ticker(
@@ -259,10 +278,12 @@ def fixture_ticker(
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
+    
+    # Restrict inbound structural parameters down to League ID 39
     for params in [
-        {"status": "notstarted", "limit": min(gws+10,200), "date_from": today},
-        {"limit": min(gws+10,200), "date_from": today},
-        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+10,200)},
+        {"status": "notstarted", "limit": min(gws+15,200), "date_from": today, "league_id": 39},
+        {"limit": min(gws+15,200), "date_from": today, "league_id": 39},
+        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+15,200), "league_id": 39},
     ]:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
@@ -275,7 +296,17 @@ def fixture_ticker(
     if not raw:
         raise HTTPException(404,
             f"No upcoming fixtures for '{team}'. "
-            "BSD may not have 2026/27 fixtures indexed yet — check back in August.")
+            "BSD may not have fixtures indexed yet — check back soon.")
+
+    # Python-side extraction filtering to drop domestic/continental cups
+    raw = [
+        fix for fix in raw 
+        if fix.get("league_id") == 39 
+        or str(fix.get("competition_id")) == "39"
+        or "Premier League" in str(fix.get("league", ""))
+        or "Premier League" in str(fix.get("competition", ""))
+        or (isinstance(fix.get("round_number"), int) and fix.get("round_number") <= 38)
+    ]
 
     raw.sort(key=lambda f: f.get("event_date") or "")
     upcoming = raw[:gws]
