@@ -98,32 +98,39 @@ def _get_fpl_data() -> dict:
 # ── BSD fixture helpers ───────────────────────────────────────────────────────
 
 def _is_pl(fix: dict) -> bool:
-    """Strictly targets Premier League matches (League ID 39)."""
+    """Strictly blocks cups/friendlies and allows only pure Premier League."""
+    league_name = str(fix.get("league", "")).lower()
+    comp_name = str(fix.get("competition", "")).lower()
+    full_name = league_name + " " + comp_name
+    
+    # 1. The Blocklist: Kill anything that is a cup, friendly, or preseason series
+    rejects = ["cup", "friendly", "friendlies", "shield", "series", "summer", "champions", "europa", "conference", "trophy"]
+    if any(r in full_name for r in rejects):
+        return False
+        
+    # 2. The Allowlist: API-Sports ID 39 OR explicit "premier league" name
     l_id = str(fix.get("league_id", ""))
     c_id = str(fix.get("competition_id", ""))
+    
     if l_id == "39" or c_id == "39":
         return True
-    
-    l_name = str(fix.get("league", "")).lower()
-    c_name = str(fix.get("competition", "")).lower()
-    return "premier league" in l_name or "premier league" in c_name
+        
+    if "premier league" in full_name:
+        return True
+        
+    return False
 
 def _fdr(defence: int, is_away: bool) -> int:
-    """
-    Math fixed for FDR calculation only. 
-    Handles both standard 0-100 scores and Elo-style ratings.
-    """
-    # If _dynamic_ratings passes an Elo score (e.g. 1500), map it down to 0-100
-    if defence > 200:
-        norm_def = ((defence - 1000) / 1000) * 100
-        defence = max(0, min(100, norm_def))
-        
-    defence = max(0, min(100, defence))
-    base = defence + (10 if is_away else 0)  # Away handicap
+    """Maps 0-100 rating to standard FPL FDR (2 to 5)."""
+    if defence < 35: fdr = 2      # Weak defence -> Easy (2)
+    elif defence < 65: fdr = 3    # Average defence -> Medium (3)
+    elif defence < 85: fdr = 4    # Strong defence -> Hard (4)
+    else: fdr = 5                 # Elite defence -> Very Hard (5)
     
-    # 0-100 scale divided by 20 correctly yields 1 through 5
-    fdr = 1 + int(base // 20)
-    return int(max(1, min(5, fdr)))
+    if is_away:
+        fdr = min(5, fdr + 1)     # Away handicap bumps difficulty
+        
+    return max(2, fdr)            # FDR is rarely 1
 
 def _fdr_label(fdr: int) -> str:
     return "Easy" if fdr <= 2 else ("Medium" if fdr == 3 else "Hard")
@@ -142,7 +149,7 @@ def _get_opponent_defence(opp_id: int) -> int:
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
         })
         if not data:
-            return 40  # Promoted team fallback (yields FDR 3 Home / 3 Away)
+            return 50  # Average baseline for missing data (yields FDR 3)
             
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
@@ -160,18 +167,22 @@ def _get_opponent_defence(opp_id: int) -> int:
                                 ("D" if scored == conceded else "L"), "formation": ""})
         if matches:
             _, defence = _dynamic_ratings(matches)
-            return defence
+            
+            # If dynamic_ratings passes an Elo score (e.g. 1200), map it safely down to 0-100
+            if defence > 200:
+                defence = ((defence - 900) / 600) * 100
+                
+            return int(max(0, min(100, defence)))
     except Exception:
         pass
-    return 40
+    return 50
 
 def _next_fixture(bsd_team_id: int) -> dict:
-    """Get next upcoming fixture using date_from=today."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
     for params in [
-        {"status": "notstarted", "limit": 10, "date_from": today},
-        {"limit": 15, "date_from": today},
+        {"status": "notstarted", "limit": 20, "date_from": today},
+        {"limit": 25, "date_from": today},
     ]:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
@@ -258,7 +269,7 @@ def _reason_fpl(player: dict, fdr: int, fdr_label: str, opp: str, venue: str) ->
     return f"{form_str.capitalize()} · {fix_str}."
 
 
-# ── Step 1: Fixture Ticker (BSD + PL League ID) ───────────────────────────────
+# ── Step 1: Fixture Ticker ────────────────────────────────────────────────────
 
 @router.get("/fpl/fixtures")
 def fixture_ticker(
@@ -278,9 +289,9 @@ def fixture_ticker(
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
     for params in [
-        {"status": "notstarted", "limit": min(gws+20, 200), "date_from": today},
-        {"limit": min(gws+20, 200), "date_from": today},
-        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+20, 200)},
+        {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today},
+        {"limit": min(gws+30, 200), "date_from": today},
+        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
     ]:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
@@ -293,7 +304,7 @@ def fixture_ticker(
     if not raw:
         raise HTTPException(404, f"No upcoming fixtures for '{team}'.")
 
-    # Strict isolation for Premier League matches utilizing League ID 39
+    # Strict isolation for Premier League matches utilizing the new blocklist
     pl_matches = [fix for fix in raw if _is_pl(fix)]
     raw = pl_matches if pl_matches else raw
 
@@ -340,7 +351,7 @@ def fixture_ticker(
     return result
 
 
-# ── Step 2: Captain Pick (FPL API data + BSD fixture) ────────────────────────
+# ── Step 2: Captain Pick ──────────────────────────────────────────────────────
 
 @router.get("/fpl/captain")
 def captain_pick(
@@ -417,7 +428,7 @@ def captain_pick(
     return result
 
 
-# ── Step 3: Transfer Recommender (FPL API + BSD fixture) ─────────────────────
+# ── Step 3: Transfer Recommender ──────────────────────────────────────────────
 
 @router.get("/fpl/transfers")
 def transfer_recommender(
@@ -494,7 +505,7 @@ def transfer_recommender(
     return result
 
 
-# ── Step 4: Differential Finder (FPL API + BSD fixture) ──────────────────────
+# ── Step 4: Differential Finder ───────────────────────────────────────────────
 
 @router.get("/fpl/differentials")
 def differential_finder(
