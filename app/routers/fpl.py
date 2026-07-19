@@ -38,10 +38,6 @@ TRANS_TTL= 3600
 DIFF_TTL = 1800
 
 # ── FPL team_id → BSD search name ────────────────────────────────────────────
-# FPL team IDs are fixed per season. These match the 2025/26 bootstrap response.
-# Update if team IDs change for 2026/27 (they usually shift when teams are
-# promoted/relegated). Map to the name bsd_find_team() can resolve.
-
 FPL_TEAM_TO_BSD: dict[int, str] = {
     1:  "Arsenal",
     2:  "Aston Villa",
@@ -119,23 +115,24 @@ def _get_opponent_defence(opp_id: int) -> int:
     """Calculates opponent defensive rating using strictly historical PL matches."""
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        # Query with league_id to filter out cups at the API resource level
+        # Keep original parameters to prevent API errors, fetch larger limit to filter down
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
-            "status": "finished", "limit": 40,
+            "status": "finished", "limit": 60,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
-            "league_id": 39 
         })
         if not data:
             return 75
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
         for fix in raw:
-            # Code validation fallback to drop unauthorized competition formats
-            l_id = fix.get("league_id") or fix.get("competition_id")
-            league_str = str(fix.get("league", "")) + str(fix.get("competition", ""))
+            # Pure Python-side filter to block cup inflation
+            league_name = str(fix.get("league", "") or "").lower()
+            comp_name = str(fix.get("competition", "") or "").lower()
+            l_id = str(fix.get("league_id") or fix.get("competition_id") or "")
             
-            if l_id != 39 and "Premier League" not in league_str and l_id is not None:
-                continue
+            if any(cup in league_name or cup in comp_name for cup in ["cup", "champions", "europa", "conference", "shield"]):
+                if "premier league" not in league_name and "premier league" not in comp_name and l_id != "39":
+                    continue
                 
             is_home  = fix.get("home_team_id") == opp_id
             scored   = fix.get("home_score" if is_home else "away_score") or 0
@@ -155,21 +152,21 @@ def _next_fixture(bsd_team_id: int) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
     for params in [
-        {"status": "notstarted", "limit": 15, "date_from": today, "league_id": 39},
-        {"limit": 15, "date_from": today, "league_id": 39},
+        {"status": "notstarted", "limit": 40, "date_from": today},
+        {"limit": 40, "date_from": today},
     ]:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                # Isolate target league records explicitly
+                # Isolate Premier League matches in Python safely
                 fixes = [
                     fix for fix in f 
-                    if fix.get("league_id") == 39 
+                    if "premier league" in str(fix.get("league", "")).lower()
+                    or "premier league" in str(fix.get("competition", "")).lower()
+                    or str(fix.get("league_id")) == "39"
                     or str(fix.get("competition_id")) == "39"
-                    or "Premier League" in str(fix.get("league", ""))
-                    or "Premier League" in str(fix.get("competition", ""))
-                    or fix.get("round_number")
+                    or fix.get("round_number") is not None
                 ]
                 if fixes:
                     break
@@ -200,8 +197,6 @@ def _next_fixture(bsd_team_id: int) -> dict:
 def _fpl_score(p: dict) -> float:
     """
     Score a player using FPL API confirmed fields.
-    Primary signal: points_per_game (most stable preseason metric)
-    Secondary: xG_per_90, xA_per_90, form (when season is live)
     """
     ppg   = float(p.get("points_per_game") or 0)
     xg90  = float(p.get("expected_goals_per_90") or 0)
@@ -210,11 +205,9 @@ def _fpl_score(p: dict) -> float:
     ep    = float(p.get("ep_next") or 0)
     mins  = int(p.get("minutes") or 0)
 
-    # Preseason: ppg is the most reliable signal (full season data)
-    # During season: form and ep_next become more relevant
-    if mins > 900:   # played enough to trust ppg
+    if mins > 900:
         score = ppg * 2.0 + xg90 * 3.0 + xa90 * 2.0 + form * 0.5 + ep * 0.3
-    else:            # limited data — rely more on ep_next
+    else:
         score = ep * 1.0 + ppg * 1.0
     return round(score, 3)
 
@@ -279,11 +272,11 @@ def fixture_ticker(
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
     
-    # Restrict inbound structural parameters down to League ID 39
+    # Restored original working parameter signatures (removed structural league_id breaks)
     for params in [
-        {"status": "notstarted", "limit": min(gws+15,200), "date_from": today, "league_id": 39},
-        {"limit": min(gws+15,200), "date_from": today, "league_id": 39},
-        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+15,200), "league_id": 39},
+        {"status": "notstarted", "limit": 100, "date_from": today},
+        {"limit": 100, "date_from": today},
+        {"team_id": team_id, "date_from": today, "status":"notstarted","limit": 100},
     ]:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
@@ -295,16 +288,15 @@ def fixture_ticker(
 
     if not raw:
         raise HTTPException(404,
-            f"No upcoming fixtures for '{team}'. "
-            "BSD may not have fixtures indexed yet — check back soon.")
+            f"No upcoming fixtures for '{team}'. Check back soon.")
 
-    # Python-side extraction filtering to drop domestic/continental cups
+    # Safe Python-side filter mapping to strip domestic/continental cup tournaments
     raw = [
         fix for fix in raw 
-        if fix.get("league_id") == 39 
+        if "premier league" in str(fix.get("league", "")).lower()
+        or "premier league" in str(fix.get("competition", "")).lower()
+        or str(fix.get("league_id")) == "39"
         or str(fix.get("competition_id")) == "39"
-        or "Premier League" in str(fix.get("league", ""))
-        or "Premier League" in str(fix.get("competition", ""))
         or (isinstance(fix.get("round_number"), int) and fix.get("round_number") <= 38)
     ]
 
@@ -368,14 +360,12 @@ def captain_pick(
     fpl   = _get_fpl_data()
     teams = fpl["teams"]
 
-    # Find FPL team_id by name (case-insensitive)
     fpl_team_id = None
     for tid, tname in teams.items():
         if tname.lower() == team.lower() or tname.lower().startswith(team.lower()[:4]):
             fpl_team_id = tid
             break
     if not fpl_team_id:
-        # Try partial match
         for tid, tname in teams.items():
             if team.lower() in tname.lower() or tname.lower() in team.lower():
                 fpl_team_id = tid
@@ -385,27 +375,24 @@ def captain_pick(
 
     team_name = teams[fpl_team_id]
 
-    # Get BSD team ID for fixture data
     bsd_team_id, _ = bsd_find_team(
         FPL_TEAM_TO_BSD.get(fpl_team_id, team_name)
     )
     nf  = _next_fixture(bsd_team_id) if bsd_team_id else {}
     fdr = nf.get("fdr", 3)
 
-    # Filter to attackers and midfielders (pos 3=MID, 4=FWD)
     squad = [
         _build_player(p, teams)
         for p in fpl["players"]
         if p.get("team") == fpl_team_id
         and p.get("element_type") in {3, 4}
-        and p.get("status") != "u"   # exclude unavailable
+        and p.get("status") != "u"
         and int(p.get("minutes") or 0) > 0
     ]
 
     if not squad:
         raise HTTPException(404, f"No attacking players found for {team_name}.")
 
-    # Score and rank
     fdr_mult = FDR_MULTIPLIER.get(fdr, 1.0)
     for p in squad:
         p["weighted_score"] = round(p["fpl_score"] * fdr_mult, 3)
@@ -445,8 +432,6 @@ def transfer_recommender(
 ):
     """
     Best transfer targets by position and price range.
-    All 20 PL clubs searched. Ranked by value_score = fpl_score × fixture / price.
-    Uses real FPL prices in £m, not BSD market values.
     """
     pos_upper = position.strip().upper()
     pos_id_map = {"GKP":1,"DEF":2,"MID":3,"FWD":4}
@@ -463,7 +448,6 @@ def transfer_recommender(
     fpl   = _get_fpl_data()
     teams = fpl["teams"]
 
-    # Filter players by position + price + availability
     candidates_raw = [
         p for p in fpl["players"]
         if p.get("element_type") == pos_id
@@ -472,7 +456,6 @@ def transfer_recommender(
         and int(p.get("minutes") or 0) > 0
     ]
 
-    # Build players + get fixture per team (cache BSD calls per team)
     team_fixtures: dict[int, dict] = {}
     results = []
 
@@ -488,7 +471,6 @@ def transfer_recommender(
         player["weighted_score"] = round(player["fpl_score"] * FDR_MULTIPLIER.get(fdr,1.0), 3)
         player["reason"]         = _reason_fpl(player, fdr, _fdr_label(fdr),
                                                 nf.get("opponent","?"), nf.get("venue","H"))
-        # Value score — output relative to price
         price = player["price"] or 4.0
         player["value_score"] = round(player["weighted_score"] / price, 3)
         results.append(player)
@@ -530,7 +512,6 @@ def differential_finder(
 ):
     """
     Low-ownership players with good form and easy fixtures.
-    Uses real FPL ownership % — not a proxy. Proper differentials.
     """
     pos_upper = position.strip().upper()
     pos_id_map = {"GKP":1,"DEF":2,"MID":3,"FWD":4}
@@ -553,8 +534,8 @@ def differential_finder(
         and p.get("status") != "u"
         and float(p.get("selected_by_percent") or 0) <= max_ownership
         and (p.get("now_cost") or 0) / 10 <= max_price
-        and int(p.get("minutes") or 0) > 450   # must have played meaningfully
-        and float(p.get("points_per_game") or 0) >= 3.0  # minimum output
+        and int(p.get("minutes") or 0) > 450
+        and float(p.get("points_per_game") or 0) >= 3.0
     ]
 
     team_fixtures: dict[int, dict] = {}
@@ -568,11 +549,10 @@ def differential_finder(
         nf  = team_fixtures[tid]
         fdr = nf.get("fdr", 3)
         if fdr > 3:
-            continue   # only easy/medium fixtures for differentials
+            continue
 
         player  = _build_player(p, teams)
         ease    = EASE_BONUS.get(fdr, 1.0)
-        # Differential score rewards: output × easy fixture × low ownership
         own_bonus = max(1.0, (max_ownership - player["ownership"]) / 5)
         player["diff_score"]     = round(player["fpl_score"] * ease * own_bonus, 3)
         player["weighted_score"] = round(player["fpl_score"] * FDR_MULTIPLIER.get(fdr,1.0), 3)
