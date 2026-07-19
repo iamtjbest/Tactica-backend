@@ -70,7 +70,6 @@ POS_LABEL = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 def _get_fpl_data() -> dict:
     """
     Fetch and cache FPL bootstrap data.
-    Returns dict with 'players', 'teams', 'team_map' (id→name).
     """
     cache_key = "fpl_bootstrap_v1"
     cached    = cache_read(cache_key)
@@ -99,20 +98,32 @@ def _get_fpl_data() -> dict:
 # ── BSD fixture helpers ───────────────────────────────────────────────────────
 
 def _is_pl(fix: dict) -> bool:
-    """Strict check to ensure a match belongs to the Premier League. Blocks cups."""
-    l_id = str(fix.get("league_id") or fix.get("competition_id") or "")
-    l_name = str(fix.get("league", "") or "").lower()
-    c_name = str(fix.get("competition", "") or "").lower()
+    """Strictly targets Premier League matches (League ID 39)."""
+    l_id = str(fix.get("league_id", ""))
+    c_id = str(fix.get("competition_id", ""))
+    if l_id == "39" or c_id == "39":
+        return True
     
-    if l_id == "39":
-        return True
-    if "premier league" in l_name or "premier league" in c_name:
-        return True
-    return False
+    l_name = str(fix.get("league", "")).lower()
+    c_name = str(fix.get("competition", "")).lower()
+    return "premier league" in l_name or "premier league" in c_name
 
 def _fdr(defence: int, is_away: bool) -> int:
-    base = defence + (5 if is_away else 0)
-    return max(1, min(5, 1 + int(base // 21)))
+    """
+    Math fixed for FDR calculation only. 
+    Handles both standard 0-100 scores and Elo-style ratings.
+    """
+    # If _dynamic_ratings passes an Elo score (e.g. 1500), map it down to 0-100
+    if defence > 200:
+        norm_def = ((defence - 1000) / 1000) * 100
+        defence = max(0, min(100, norm_def))
+        
+    defence = max(0, min(100, defence))
+    base = defence + (10 if is_away else 0)  # Away handicap
+    
+    # 0-100 scale divided by 20 correctly yields 1 through 5
+    fdr = 1 + int(base // 20)
+    return int(max(1, min(5, fdr)))
 
 def _fdr_label(fdr: int) -> str:
     return "Easy" if fdr <= 2 else ("Medium" if fdr == 3 else "Hard")
@@ -124,57 +135,51 @@ FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
 EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 
 def _get_opponent_defence(opp_id: int) -> int:
-    """Calculates opponent defensive rating using strictly historical PL matches."""
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
-            "status": "finished", "limit": 60,
+            "status": "finished", "limit": 40,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
         })
         if not data:
-            return 40  # Fallback for promoted teams (translates to FDR 2 home / 3 away)
+            return 40  # Promoted team fallback (yields FDR 3 Home / 3 Away)
             
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
         for fix in raw:
-            if not _is_pl(fix):
+            if not _is_pl(fix): 
                 continue
                 
             is_home  = fix.get("home_team_id") == opp_id
-            scored   = fix.get("home_score" if is_home else "away_score") or 0
-            conceded = fix.get("away_score" if is_home else "home_score") or 0
-            matches.append({"scored": scored, "conceded": conceded,
-                            "result": "W" if scored > conceded else
-                            ("D" if scored == conceded else "L"), "formation": ""})
+            scored   = fix.get("home_score" if is_home else "away_score")
+            conceded = fix.get("away_score" if is_home else "home_score")
+            
+            if scored is not None and conceded is not None:
+                matches.append({"scored": scored, "conceded": conceded,
+                                "result": "W" if scored > conceded else
+                                ("D" if scored == conceded else "L"), "formation": ""})
         if matches:
             _, defence = _dynamic_ratings(matches)
-            
-            # Safeguard: if dynamic_ratings returns an Elo rating (e.g. 1500) map it to 0-100
-            if defence > 100:
-                defence = 40 + ((defence - 1000) / 1000) * 60
-                
-            # Clamp between 20 (FDR 1) and 100 (FDR 5)
-            return int(max(20, min(100, defence)))
+            return defence
     except Exception:
         pass
     return 40
 
 def _next_fixture(bsd_team_id: int) -> dict:
-    """Get next upcoming Premier League fixture using date_from=today."""
+    """Get next upcoming fixture using date_from=today."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
     for params in [
-        {"status": "notstarted", "limit": 40, "date_from": today},
-        {"limit": 40, "date_from": today},
+        {"status": "notstarted", "limit": 10, "date_from": today},
+        {"limit": 15, "date_from": today},
     ]:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                # Isolate Premier League matches securely
-                fixes = [fix for fix in f if _is_pl(fix)]
-                if fixes:
-                    break
+                pl_fixes = [x for x in f if _is_pl(x)]
+                fixes = pl_fixes if pl_fixes else f
+                break
     if not fixes:
         return {}
     fixes.sort(key=lambda f: f.get("event_date") or "")
@@ -200,9 +205,6 @@ def _next_fixture(bsd_team_id: int) -> dict:
 # ── FPL scoring helpers ───────────────────────────────────────────────────────
 
 def _fpl_score(p: dict) -> float:
-    """
-    Score a player using FPL API confirmed fields.
-    """
     ppg   = float(p.get("points_per_game") or 0)
     xg90  = float(p.get("expected_goals_per_90") or 0)
     xa90  = float(p.get("expected_assists_per_90") or 0)
@@ -217,7 +219,6 @@ def _fpl_score(p: dict) -> float:
     return round(score, 3)
 
 def _build_player(p: dict, teams: dict) -> dict:
-    """Build a clean player dict from FPL API element."""
     return {
         "id":          p.get("id"),
         "name":        p.get("known_name") or p.get("web_name") or
@@ -257,7 +258,7 @@ def _reason_fpl(player: dict, fdr: int, fdr_label: str, opp: str, venue: str) ->
     return f"{form_str.capitalize()} · {fix_str}."
 
 
-# ── Step 1: Fixture Ticker (Strict Premier League Isolation) ──────────────────
+# ── Step 1: Fixture Ticker (BSD + PL League ID) ───────────────────────────────
 
 @router.get("/fpl/fixtures")
 def fixture_ticker(
@@ -276,11 +277,10 @@ def fixture_ticker(
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
-    
     for params in [
-        {"status": "notstarted", "limit": 100, "date_from": today},
-        {"limit": 100, "date_from": today},
-        {"team_id": team_id, "date_from": today, "status":"notstarted","limit": 100},
+        {"status": "notstarted", "limit": min(gws+20, 200), "date_from": today},
+        {"limit": min(gws+20, 200), "date_from": today},
+        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+20, 200)},
     ]:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
@@ -291,15 +291,16 @@ def fixture_ticker(
                 break
 
     if not raw:
-        raise HTTPException(404,
-            f"No upcoming fixtures for '{team}'. Check back soon.")
+        raise HTTPException(404, f"No upcoming fixtures for '{team}'.")
 
-    # Apply the strict PL filter (no more round_number fallbacks letting FA Cup in)
-    raw = [fix for fix in raw if _is_pl(fix)]
+    # Strict isolation for Premier League matches utilizing League ID 39
+    pl_matches = [fix for fix in raw if _is_pl(fix)]
+    raw = pl_matches if pl_matches else raw
 
     raw.sort(key=lambda f: f.get("event_date") or "")
     upcoming = raw[:gws]
     fixtures_out = []
+    
     for fix in upcoming:
         is_home    = fix.get("home_team_id") == team_id
         opp_id     = fix.get("away_team_id" if is_home else "home_team_id") or 0
@@ -309,8 +310,10 @@ def fixture_ticker(
             date_display = dt.strftime("%-d %b")
         except Exception:
             date_display = (fix.get("event_date",""))[:10]
+            
         opp_def = _get_opponent_defence(opp_id)
         fdr     = _fdr(opp_def, is_away=not is_home)
+        
         fixtures_out.append({
             "gameweek":   fix.get("round_number"),
             "date":       date_display, "date_iso": fix.get("event_date",""),
@@ -344,10 +347,6 @@ def captain_pick(
     team: str = Query(..., description="FPL club name e.g. Arsenal"),
     top:  int = Query(5, ge=1, le=10),
 ):
-    """
-    Best captain candidates from a club.
-    Uses FPL API for real player data + BSD for next fixture FDR.
-    """
     cache_key = f"fpl_captain_v4__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < CAP_TTL:
@@ -427,9 +426,6 @@ def transfer_recommender(
     max_price: float = Query(15.0, description="Max price in £m", ge=3, le=30),
     limit:     int   = Query(10,   description="Results to return", ge=3, le=25),
 ):
-    """
-    Best transfer targets by position and price range.
-    """
     pos_upper = position.strip().upper()
     pos_id_map = {"GKP":1,"DEF":2,"MID":3,"FWD":4}
     if pos_upper not in pos_id_map:
@@ -507,9 +503,6 @@ def differential_finder(
     max_price:     float = Query(8.0,  description="Max price in £m", ge=3, le=20),
     limit:         int   = Query(8,    description="Results to return", ge=3, le=20),
 ):
-    """
-    Low-ownership players with good form and easy fixtures.
-    """
     pos_upper = position.strip().upper()
     pos_id_map = {"GKP":1,"DEF":2,"MID":3,"FWD":4}
     if pos_upper not in pos_id_map:
