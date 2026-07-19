@@ -98,6 +98,18 @@ def _get_fpl_data() -> dict:
 
 # ── BSD fixture helpers ───────────────────────────────────────────────────────
 
+def _is_pl(fix: dict) -> bool:
+    """Strict check to ensure a match belongs to the Premier League. Blocks cups."""
+    l_id = str(fix.get("league_id") or fix.get("competition_id") or "")
+    l_name = str(fix.get("league", "") or "").lower()
+    c_name = str(fix.get("competition", "") or "").lower()
+    
+    if l_id == "39":
+        return True
+    if "premier league" in l_name or "premier league" in c_name:
+        return True
+    return False
+
 def _fdr(defence: int, is_away: bool) -> int:
     base = defence + (5 if is_away else 0)
     return max(1, min(5, 1 + int(base // 21)))
@@ -115,24 +127,18 @@ def _get_opponent_defence(opp_id: int) -> int:
     """Calculates opponent defensive rating using strictly historical PL matches."""
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        # Keep original parameters to prevent API errors, fetch larger limit to filter down
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
             "status": "finished", "limit": 60,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
         })
         if not data:
-            return 75
+            return 40  # Fallback for promoted teams (translates to FDR 2 home / 3 away)
+            
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
         for fix in raw:
-            # Pure Python-side filter to block cup inflation
-            league_name = str(fix.get("league", "") or "").lower()
-            comp_name = str(fix.get("competition", "") or "").lower()
-            l_id = str(fix.get("league_id") or fix.get("competition_id") or "")
-            
-            if any(cup in league_name or cup in comp_name for cup in ["cup", "champions", "europa", "conference", "shield"]):
-                if "premier league" not in league_name and "premier league" not in comp_name and l_id != "39":
-                    continue
+            if not _is_pl(fix):
+                continue
                 
             is_home  = fix.get("home_team_id") == opp_id
             scored   = fix.get("home_score" if is_home else "away_score") or 0
@@ -142,10 +148,16 @@ def _get_opponent_defence(opp_id: int) -> int:
                             ("D" if scored == conceded else "L"), "formation": ""})
         if matches:
             _, defence = _dynamic_ratings(matches)
-            return defence
+            
+            # Safeguard: if dynamic_ratings returns an Elo rating (e.g. 1500) map it to 0-100
+            if defence > 100:
+                defence = 40 + ((defence - 1000) / 1000) * 60
+                
+            # Clamp between 20 (FDR 1) and 100 (FDR 5)
+            return int(max(20, min(100, defence)))
     except Exception:
         pass
-    return 75
+    return 40
 
 def _next_fixture(bsd_team_id: int) -> dict:
     """Get next upcoming Premier League fixture using date_from=today."""
@@ -159,15 +171,8 @@ def _next_fixture(bsd_team_id: int) -> dict:
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                # Isolate Premier League matches in Python safely
-                fixes = [
-                    fix for fix in f 
-                    if "premier league" in str(fix.get("league", "")).lower()
-                    or "premier league" in str(fix.get("competition", "")).lower()
-                    or str(fix.get("league_id")) == "39"
-                    or str(fix.get("competition_id")) == "39"
-                    or fix.get("round_number") is not None
-                ]
+                # Isolate Premier League matches securely
+                fixes = [fix for fix in f if _is_pl(fix)]
                 if fixes:
                     break
     if not fixes:
@@ -272,7 +277,6 @@ def fixture_ticker(
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
     
-    # Restored original working parameter signatures (removed structural league_id breaks)
     for params in [
         {"status": "notstarted", "limit": 100, "date_from": today},
         {"limit": 100, "date_from": today},
@@ -290,15 +294,8 @@ def fixture_ticker(
         raise HTTPException(404,
             f"No upcoming fixtures for '{team}'. Check back soon.")
 
-    # Safe Python-side filter mapping to strip domestic/continental cup tournaments
-    raw = [
-        fix for fix in raw 
-        if "premier league" in str(fix.get("league", "")).lower()
-        or "premier league" in str(fix.get("competition", "")).lower()
-        or str(fix.get("league_id")) == "39"
-        or str(fix.get("competition_id")) == "39"
-        or (isinstance(fix.get("round_number"), int) and fix.get("round_number") <= 38)
-    ]
+    # Apply the strict PL filter (no more round_number fallbacks letting FA Cup in)
+    raw = [fix for fix in raw if _is_pl(fix)]
 
     raw.sort(key=lambda f: f.get("event_date") or "")
     upcoming = raw[:gws]
