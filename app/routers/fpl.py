@@ -94,17 +94,16 @@ def _get_fpl_data() -> dict:
 
 # ── BSD fixture helpers ───────────────────────────────────────────────────────
 
+def _is_pl(fix: dict) -> bool:
+    """Strictly use the League ID to identify genuine EPL matches."""
+    l_id = str(fix.get("league_id", ""))
+    c_id = str(fix.get("competition_id", ""))
+    return l_id == "39" or c_id == "39"
+
 def _fdr(defence: int, is_away: bool) -> int:
-    """Maps 0-100 rating to standard FPL FDR (2 to 5)."""
-    if defence < 35: fdr = 2      # Weak defence -> Easy (2)
-    elif defence < 65: fdr = 3    # Average defence -> Medium (3)
-    elif defence < 85: fdr = 4    # Strong defence -> Hard (4)
-    else: fdr = 5                 # Elite defence -> Very Hard (5)
-    
-    if is_away:
-        fdr = min(5, fdr + 1)     # Away handicap bumps difficulty
-        
-    return max(2, fdr)            # FDR is rarely 1
+    """Original FDR math formula applied to normalized scores."""
+    base = defence + (5 if is_away else 0)
+    return max(1, min(5, 1 + int(base // 21)))
 
 def _fdr_label(fdr: int) -> str:
     return "Easy" if fdr <= 2 else ("Medium" if fdr == 3 else "Hard")
@@ -118,18 +117,20 @@ EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 def _get_opponent_defence(opp_id: int) -> int:
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        # Direct API-level filter for Premier League
+        # Standard parameters without breaking the endpoint
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
             "status": "finished", "limit": 40,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
-            "league_id": 39
         })
         if not data:
-            return 50  # Average baseline for missing data (yields FDR 3)
+            return 45  # Standard fallback mapping to FDR 3
             
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
         for fix in raw:
+            if not _is_pl(fix):
+                continue
+                
             is_home  = fix.get("home_team_id") == opp_id
             scored   = fix.get("home_score" if is_home else "away_score")
             conceded = fix.get("away_score" if is_home else "home_score")
@@ -141,29 +142,32 @@ def _get_opponent_defence(opp_id: int) -> int:
         if matches:
             _, defence = _dynamic_ratings(matches)
             
-            if defence > 200:
-                defence = ((defence - 900) / 600) * 100
+            # Normalize Elo-style ratings strictly down to the 20-90 scale
+            if defence > 100:
+                defence = 20 + ((defence - 1000) / 1000) * 60
                 
-            return int(max(0, min(100, defence)))
+            return int(max(10, min(90, defence)))
     except Exception:
         pass
-    return 50
+    return 45
 
 def _next_fixture(bsd_team_id: int) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
     
-    # Passing league_id directly to the API
     for params in [
-        {"status": "notstarted", "limit": 10, "date_from": today, "league_id": 39},
-        {"limit": 15, "date_from": today, "league_id": 39},
+        {"status": "notstarted", "limit": 15, "date_from": today},
+        {"limit": 20, "date_from": today},
     ]:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                fixes = f
-                break
+                # Python-side filtering using league_id
+                pl_fixes = [x for x in f if _is_pl(x)]
+                fixes = pl_fixes
+                if fixes:
+                    break
                 
     if not fixes:
         return {}
@@ -252,7 +256,8 @@ def fixture_ticker(
     team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
     gws:  int = Query(38, description="Gameweeks to show", ge=1, le=50),
 ):
-    cache_key = f"fpl_fixtures_v5__{team.lower().replace(' ','_')}"
+    # Bumped to v6 to immediately flush out your 404 cached error
+    cache_key = f"fpl_fixtures_v6__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
         cached["cached"] = True
@@ -265,11 +270,10 @@ def fixture_ticker(
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
     
-    # Passing league_id directly to the API to pull only PL matches
     for params in [
-        {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today, "league_id": 39},
-        {"limit": min(gws+30, 200), "date_from": today, "league_id": 39},
-        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200), "league_id": 39},
+        {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today},
+        {"limit": min(gws+30, 200), "date_from": today},
+        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
     ]:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
@@ -279,8 +283,12 @@ def fixture_ticker(
                 raw = r
                 break
 
+    # Filtering exclusively by league ID locally
+    pl_matches = [fix for fix in raw if _is_pl(fix)]
+    raw = pl_matches
+
     if not raw:
-        raise HTTPException(404, f"No upcoming fixtures for '{team}'.")
+        raise HTTPException(404, f"No upcoming Premier League fixtures for '{team}'.")
 
     raw.sort(key=lambda f: f.get("event_date") or "")
     upcoming = raw[:gws]
@@ -332,7 +340,7 @@ def captain_pick(
     team: str = Query(..., description="FPL club name e.g. Arsenal"),
     top:  int = Query(5, ge=1, le=10),
 ):
-    cache_key = f"fpl_captain_v4__{team.lower().replace(' ','_')}"
+    cache_key = f"fpl_captain_v5__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < CAP_TTL:
         cached["cached"] = True
@@ -417,7 +425,7 @@ def transfer_recommender(
         raise HTTPException(400, "position must be GKP, DEF, MID, or FWD")
     pos_id = pos_id_map[pos_upper]
 
-    cache_key = f"fpl_trans_v2__{pos_upper}__{min_price}__{max_price}"
+    cache_key = f"fpl_trans_v3__{pos_upper}__{min_price}__{max_price}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < TRANS_TTL:
         cached["cached"] = True
@@ -494,7 +502,7 @@ def differential_finder(
         raise HTTPException(400, "position must be GKP, DEF, MID, or FWD")
     pos_id = pos_id_map[pos_upper]
 
-    cache_key = f"fpl_diff_v2__{pos_upper}__{max_ownership}__{max_price}"
+    cache_key = f"fpl_diff_v3__{pos_upper}__{max_ownership}__{max_price}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < DIFF_TTL:
         cached["cached"] = True
