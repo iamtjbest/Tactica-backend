@@ -37,7 +37,7 @@ CAP_TTL  = 1800
 TRANS_TTL= 3600
 DIFF_TTL = 1800
 
-# ── FPL team_id → BSD search name ────────────────────────────────────────────
+# ── FPL team_id → BSD search name (2026/2027 EPL Season) ────────────────────
 FPL_TEAM_TO_BSD: dict[int, str] = {
     1:  "AFC Bournemouth",
     2:  "Arsenal",
@@ -114,16 +114,35 @@ def _fdr_colour(fdr: int) -> str:
 FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
 EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 
+def _get_pl_season_id() -> int:
+    """Dynamically fetches active Premier League season_id to bypass BSD's 7-day default window."""
+    cache_key = "bsd_pl_season_id_v2"
+    cached = cache_read(cache_key)
+    if cached:
+        return cached
+
+    for path in ["/api/v2/leagues/39/season/", "/leagues/39/season/"]:
+        data = bsd_get(path)
+        if data and isinstance(data, dict) and data.get("id"):
+            season_id = data["id"]
+            cache_write(cache_key, season_id)
+            return season_id
+    return None
+
 def _get_opponent_defence(opp_id: int) -> int:
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        # Standard parameters without breaking the endpoint
-        data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
-            "status": "finished", "limit": 40,
-            "date_from": "2025-08-01T00:00:00Z", "date_to": now,
-        })
+        # Query past completed fixtures for opponent defensive rating
+        for path in [f"/api/v2/teams/{opp_id}/fixtures/", f"/teams/{opp_id}/fixtures/"]:
+            data = bsd_get(path, params={
+                "status": "finished", "limit": 40,
+                "date_from": "2025-08-01T00:00:00Z", "date_to": now,
+            })
+            if data:
+                break
+
         if not data:
-            return 45  # Standard fallback mapping to FDR 3
+            return 45  # Fallback to FDR 3 neutral default
             
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
@@ -142,7 +161,6 @@ def _get_opponent_defence(opp_id: int) -> int:
         if matches:
             _, defence = _dynamic_ratings(matches)
             
-            # Normalize Elo-style ratings strictly down to the 20-90 scale
             if defence > 100:
                 defence = 20 + ((defence - 1000) / 1000) * 60
                 
@@ -153,21 +171,37 @@ def _get_opponent_defence(opp_id: int) -> int:
 
 def _next_fixture(bsd_team_id: int) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    season_id = _get_pl_season_id()
     fixes = []
     
-    for params in [
-        {"status": "notstarted", "league": 39, "season": 2026, "limit": 15, "date_from": today},
-        {"league": 39, "season": 2026, "limit": 20, "date_from": today},
-    ]:
-        d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
+    params = {
+        "team_id": bsd_team_id,
+        "league_id": 39,
+        "status": "notstarted",
+        "date_from": today,
+        "limit": 50,
+    }
+    if season_id:
+        params["season_id"] = season_id
+
+    for path in [f"/api/v2/teams/{bsd_team_id}/fixtures/", f"/teams/{bsd_team_id}/fixtures/"]:
+        d = bsd_get(path, params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                # Python-side filtering using league_id
-                pl_fixes = [x for x in f if _is_pl(x)]
-                fixes = pl_fixes
+                fixes = [x for x in f if _is_pl(x)]
                 if fixes:
                     break
+
+    if not fixes:
+        for path in ["/api/v2/events/", "/events/"]:
+            d = bsd_get(path, params=params)
+            if d:
+                f = d if isinstance(d, list) else d.get("results", [])
+                if f:
+                    fixes = [x for x in f if _is_pl(x)]
+                    if fixes:
+                        break
                 
     if not fixes:
         return {}
@@ -256,8 +290,7 @@ def fixture_ticker(
     team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
     gws:  int = Query(38, description="Gameweeks to show", ge=1, le=50),
 ):
-    # Bumped to v6 to immediately flush out your 404 cached error
-    cache_key = f"fpl_fixtures_v6__{team.lower().replace(' ','_')}"
+    cache_key = f"fpl_fixtures_v10__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
         cached["cached"] = True
@@ -268,24 +301,37 @@ def fixture_ticker(
         raise HTTPException(404, f"Team '{team}' not found.")
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    raw   = []
+    season_id = _get_pl_season_id()
     
-    for params in [
-        {"status": "notstarted", "league": 39, "season": 2026, "limit": min(gws+30, 200), "date_from": today},
-        {"league": 39, "season": 2026, "limit": min(gws+30, 200), "date_from": today},
-        {"team_id": team_id, "league": 39, "season": 2026, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
-    ]:
-        path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
-        d    = bsd_get(path, params=params)
+    params = {
+        "team_id": team_id,
+        "league_id": 39,
+        "status": "notstarted",
+        "date_from": today,
+        "limit": min(gws + 20, 200),
+    }
+    if season_id:
+        params["season_id"] = season_id
+
+    raw = []
+    for path in [f"/api/v2/teams/{team_id}/fixtures/", f"/teams/{team_id}/fixtures/"]:
+        d = bsd_get(path, params=params)
         if d:
             r = d if isinstance(d, list) else d.get("results", [])
             if r:
-                raw = r
-                break
+                raw = [fix for fix in r if _is_pl(fix)]
+                if raw:
+                    break
 
-    # Filtering exclusively by league ID locally
-    pl_matches = [fix for fix in raw if _is_pl(fix)]
-    raw = pl_matches
+    if not raw:
+        for path in ["/api/v2/events/", "/events/"]:
+            d = bsd_get(path, params=params)
+            if d:
+                r = d if isinstance(d, list) else d.get("results", [])
+                if r:
+                    raw = [fix for fix in r if _is_pl(fix)]
+                    if raw:
+                        break
 
     if not raw:
         raise HTTPException(404, f"No upcoming Premier League fixtures for '{team}'.")
