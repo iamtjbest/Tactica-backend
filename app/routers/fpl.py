@@ -39,26 +39,26 @@ DIFF_TTL = 1800
 
 # ── FPL team_id → BSD search name ────────────────────────────────────────────
 FPL_TEAM_TO_BSD: dict[int, str] = {
-    1:  "Arsenal",
-    2:  "Aston Villa",
-    3:  "Burnley",
-    4:  "Bournemouth",
-    5:  "Brentford",
-    6:  "Brighton",
-    7:  "Chelsea",
+    1:  "AFC Bournemouth",
+    2:  "Arsenal",
+    3:  "Aston Villa",
+    4:  "Brentford",
+    5:  "Brighton & Hove Albion",
+    6:  "Chelsea",
+    7:  "Coventry City",
     8:  "Crystal Palace",
     9:  "Everton",
     10: "Fulham",
-    11: "Leeds United",
-    12: "Liverpool",
-    13: "Manchester City",
-    14: "Manchester United",
-    15: "Newcastle United",
-    16: "Nottingham Forest",
-    17: "Sunderland",
-    18: "Tottenham Hotspur",
-    19: "West Ham United",
-    20: "Wolverhampton",
+    11: "Hull City",
+    12: "Ipswich Town",
+    13: "Leeds United",
+    14: "Liverpool",
+    15: "Manchester City",
+    16: "Manchester United",
+    17: "Newcastle United",
+    18: "Nottingham Forest",
+    19: "Sunderland",
+    20: "Tottenham Hotspur",
 }
 
 # FPL position codes
@@ -156,8 +156,8 @@ def _next_fixture(bsd_team_id: int) -> dict:
     fixes = []
     
     for params in [
-        {"status": "notstarted", "limit": 15, "date_from": today},
-        {"limit": 20, "date_from": today},
+        {"status": "notstarted", "league": 39, "season": 2026, "limit": 15, "date_from": today},
+        {"league": 39, "season": 2026, "limit": 20, "date_from": today},
     ]:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
@@ -271,9 +271,9 @@ def fixture_ticker(
     raw   = []
     
     for params in [
-        {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today},
-        {"limit": min(gws+30, 200), "date_from": today},
-        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
+        {"status": "notstarted", "league": 39, "season": 2026, "limit": min(gws+30, 200), "date_from": today},
+        {"league": 39, "season": 2026, "limit": min(gws+30, 200), "date_from": today},
+        {"team_id": team_id, "league": 39, "season": 2026, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
     ]:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
