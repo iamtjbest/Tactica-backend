@@ -37,13 +37,13 @@ CAP_TTL  = 1800
 TRANS_TTL= 3600
 DIFF_TTL = 1800
 
-# ── FPL team_id → BSD search name (2026/2027 EPL Season) ────────────────────
+# ── FPL team_id → BSD search name ────────────────────────────────────────────
 FPL_TEAM_TO_BSD: dict[int, str] = {
-    1:  "AFC Bournemouth",
-    2:  "Arsenal",
-    3:  "Aston Villa",
-    4:  "Brentford",
-    5:  "Brighton & Hove Albion",
+    1:  "Arsenal",
+    2:  "Aston Villa",
+    3:  "Brentford",
+    4:  "Brighton & Hove Albion",
+    5:  "Bournemouth",
     6:  "Chelsea",
     7:  "Coventry City",
     8:  "Crystal Palace",
@@ -114,35 +114,16 @@ def _fdr_colour(fdr: int) -> str:
 FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
 EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 
-def _get_pl_season_id() -> int:
-    """Dynamically fetches active Premier League season_id to bypass BSD's 7-day default window."""
-    cache_key = "bsd_pl_season_id_v2"
-    cached = cache_read(cache_key)
-    if cached:
-        return cached
-
-    for path in ["/api/v2/leagues/39/season/", "/leagues/39/season/"]:
-        data = bsd_get(path)
-        if data and isinstance(data, dict) and data.get("id"):
-            season_id = data["id"]
-            cache_write(cache_key, season_id)
-            return season_id
-    return None
-
 def _get_opponent_defence(opp_id: int) -> int:
     try:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        # Query past completed fixtures for opponent defensive rating
-        for path in [f"/api/v2/teams/{opp_id}/fixtures/", f"/teams/{opp_id}/fixtures/"]:
-            data = bsd_get(path, params={
-                "status": "finished", "limit": 40,
-                "date_from": "2025-08-01T00:00:00Z", "date_to": now,
-            })
-            if data:
-                break
-
+        # Standard parameters without breaking the endpoint
+        data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
+            "status": "finished", "limit": 40,
+            "date_from": "2025-08-01T00:00:00Z", "date_to": now,
+        })
         if not data:
-            return 45  # Fallback to FDR 3 neutral default
+            return 45  # Standard fallback mapping to FDR 3
             
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
@@ -161,6 +142,7 @@ def _get_opponent_defence(opp_id: int) -> int:
         if matches:
             _, defence = _dynamic_ratings(matches)
             
+            # Normalize Elo-style ratings strictly down to the 20-90 scale
             if defence > 100:
                 defence = 20 + ((defence - 1000) / 1000) * 60
                 
@@ -171,37 +153,21 @@ def _get_opponent_defence(opp_id: int) -> int:
 
 def _next_fixture(bsd_team_id: int) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    season_id = _get_pl_season_id()
     fixes = []
     
-    params = {
-        "team_id": bsd_team_id,
-        "league_id": 39,
-        "status": "notstarted",
-        "date_from": today,
-        "limit": 50,
-    }
-    if season_id:
-        params["season_id"] = season_id
-
-    for path in [f"/api/v2/teams/{bsd_team_id}/fixtures/", f"/teams/{bsd_team_id}/fixtures/"]:
-        d = bsd_get(path, params=params)
+    for params in [
+        {"status": "notstarted", "limit": 15, "date_from": today},
+        {"limit": 20, "date_from": today},
+    ]:
+        d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
             if f:
-                fixes = [x for x in f if _is_pl(x)]
+                # Python-side filtering using league_id
+                pl_fixes = [x for x in f if _is_pl(x)]
+                fixes = pl_fixes
                 if fixes:
                     break
-
-    if not fixes:
-        for path in ["/api/v2/events/", "/events/"]:
-            d = bsd_get(path, params=params)
-            if d:
-                f = d if isinstance(d, list) else d.get("results", [])
-                if f:
-                    fixes = [x for x in f if _is_pl(x)]
-                    if fixes:
-                        break
                 
     if not fixes:
         return {}
@@ -283,6 +249,37 @@ def _reason_fpl(player: dict, fdr: int, fdr_label: str, opp: str, venue: str) ->
     return f"{form_str.capitalize()} · {fix_str}."
 
 
+# ── Player list (for squad-builder search UI) ─────────────────────────────────
+
+@router.get("/fpl/players")
+def player_list():
+    """Minimal player list for client-side search — id, name, team, position, price."""
+    cache_key = "fpl_player_list_v1"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < FPL_TTL:
+        cached["cached"] = True
+        return cached
+
+    fpl   = _get_fpl_data()
+    teams = fpl["teams"]
+    out = [
+        {
+            "id":       p.get("id"),
+            "name":     p.get("known_name") or p.get("web_name") or
+                        f"{p.get('first_name','')} {p.get('second_name','')}".strip(),
+            "team":     teams.get(p.get("team",""), "Unknown"),
+            "position": POS_MAP.get(p.get("element_type"), "UNK"),
+            "price":    round((p.get("now_cost") or 0) / 10, 1),
+            "status":   p.get("status", "a"),
+        }
+        for p in fpl["players"]
+        if int(p.get("minutes") or 0) > 0 or p.get("status") == "a"
+    ]
+    result = {"players": out, "cached": False, "_cached_at": time.time()}
+    cache_write(cache_key, result)
+    return result
+
+
 # ── Step 1: Fixture Ticker ────────────────────────────────────────────────────
 
 @router.get("/fpl/fixtures")
@@ -290,7 +287,8 @@ def fixture_ticker(
     team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
     gws:  int = Query(38, description="Gameweeks to show", ge=1, le=50),
 ):
-    cache_key = f"fpl_fixtures_v10__{team.lower().replace(' ','_')}"
+    # Bumped to v6 to immediately flush out your 404 cached error
+    cache_key = f"fpl_fixtures_v6__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
         cached["cached"] = True
@@ -301,37 +299,24 @@ def fixture_ticker(
         raise HTTPException(404, f"Team '{team}' not found.")
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    season_id = _get_pl_season_id()
+    raw   = []
     
-    params = {
-        "team_id": team_id,
-        "league_id": 39,
-        "status": "notstarted",
-        "date_from": today,
-        "limit": min(gws + 20, 200),
-    }
-    if season_id:
-        params["season_id"] = season_id
-
-    raw = []
-    for path in [f"/api/v2/teams/{team_id}/fixtures/", f"/teams/{team_id}/fixtures/"]:
-        d = bsd_get(path, params=params)
+    for params in [
+        {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today},
+        {"limit": min(gws+30, 200), "date_from": today},
+        {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
+    ]:
+        path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
+        d    = bsd_get(path, params=params)
         if d:
             r = d if isinstance(d, list) else d.get("results", [])
             if r:
-                raw = [fix for fix in r if _is_pl(fix)]
-                if raw:
-                    break
+                raw = r
+                break
 
-    if not raw:
-        for path in ["/api/v2/events/", "/events/"]:
-            d = bsd_get(path, params=params)
-            if d:
-                r = d if isinstance(d, list) else d.get("results", [])
-                if r:
-                    raw = [fix for fix in r if _is_pl(fix)]
-                    if raw:
-                        break
+    # Filtering exclusively by league ID locally
+    pl_matches = [fix for fix in raw if _is_pl(fix)]
+    raw = pl_matches
 
     if not raw:
         raise HTTPException(404, f"No upcoming Premier League fixtures for '{team}'.")
@@ -615,6 +600,197 @@ def differential_finder(
         "position": pos_upper, "max_ownership": max_ownership,
         "max_price": max_price, "total_found": len(results),
         "picks": top_picks, "share_text": share_text,
+        "cached": False, "_cached_at": time.time(),
+    }
+    cache_write(cache_key, result)
+    return result
+
+
+# ── Step 5: Squad Analysis ("My Squad" mode) ──────────────────────────────────
+# Standard FPL squad composition — always 15 players, this exact split.
+SQUAD_COMPOSITION = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
+SQUAD_TTL = 900
+UPGRADE_THRESHOLD = 1.15   # candidate must score 15%+ higher to be worth flagging
+BAD_STATUS = {"i", "s", "u", "n"}  # injured / suspended / unavailable / not eligible
+
+def _team_next_fixture_cached(team_id: int, teams: dict, cache: dict) -> dict:
+    if team_id not in cache:
+        bsd_id, _ = bsd_find_team(FPL_TEAM_TO_BSD.get(team_id, teams.get(team_id, "")))
+        cache[team_id] = _next_fixture(bsd_id) if bsd_id else {}
+    return cache[team_id]
+
+def _score_player(p: dict, teams: dict, fixture_cache: dict) -> dict:
+    """Build a player dict with next_fixture + weighted_score attached."""
+    player = _build_player(p, teams)
+    nf     = _team_next_fixture_cached(player["team_id"], teams, fixture_cache)
+    fdr    = nf.get("fdr", 3)
+    player["next_fixture"]   = nf
+    player["weighted_score"] = round(player["fpl_score"] * FDR_MULTIPLIER.get(fdr, 1.0), 3)
+    player["reason"] = _reason_fpl(player, fdr, _fdr_label(fdr),
+                                    nf.get("opponent", "?"), nf.get("venue", "H"))
+    return player
+
+def _best_starting_xi(squad: list[dict]) -> tuple[list[dict], list[dict], str]:
+    """Pick the highest-scoring valid FPL formation (1 GKP + 10 outfield,
+    DEF 3-5 / MID 2-5 / FWD 1-3) from a 15-man squad."""
+    by_pos = {"GKP": [], "DEF": [], "MID": [], "FWD": []}
+    for p in squad:
+        by_pos.setdefault(p["position"], []).append(p)
+    for pos in by_pos:
+        by_pos[pos].sort(key=lambda p: p["weighted_score"], reverse=True)
+
+    best_gkp = by_pos["GKP"][0] if by_pos["GKP"] else None
+    bench_gkp = by_pos["GKP"][1] if len(by_pos["GKP"]) > 1 else None
+
+    best_total   = -1.0
+    best_combo   = None
+    best_formation = ""
+    for d in range(3, 6):
+        for m in range(2, 6):
+            f = 10 - d - m
+            if f < 1 or f > 3:
+                continue
+            if d > len(by_pos["DEF"]) or m > len(by_pos["MID"]) or f > len(by_pos["FWD"]):
+                continue
+            defs = by_pos["DEF"][:d]
+            mids = by_pos["MID"][:m]
+            fwds = by_pos["FWD"][:f]
+            total = sum(p["weighted_score"] for p in defs + mids + fwds)
+            if total > best_total:
+                best_total   = total
+                best_combo   = (defs, mids, fwds)
+                best_formation = f"{d}-{m}-{f}"
+
+    if not best_combo or not best_gkp:
+        raise HTTPException(400, "Squad doesn't have enough players in a valid position "
+                                  "split to build a starting XI (need at least 1 GKP, "
+                                  "3 DEF, 2 MID, 1 FWD).")
+
+    defs, mids, fwds = best_combo
+    starting = [best_gkp] + defs + mids + fwds
+    starting_ids = {p["id"] for p in starting}
+    bench_outfield = sorted(
+        [p for p in squad if p["id"] not in starting_ids and p["position"] != "GKP"],
+        key=lambda p: p["weighted_score"], reverse=True,
+    )
+    bench = ([bench_gkp] if bench_gkp else []) + bench_outfield
+    return starting, bench, best_formation
+
+@router.get("/fpl/squad")
+def squad_analysis(
+    player_ids: str = Query(..., description="15 comma-separated FPL player IDs"),
+    bank:       float = Query(0.0, description="Money left in the bank, £m", ge=0, le=50),
+):
+    try:
+        ids = [int(x.strip()) for x in player_ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(400, "player_ids must be a comma-separated list of integers.")
+    if len(ids) != 15 or len(set(ids)) != 15:
+        raise HTTPException(400, f"Expected exactly 15 unique player IDs, got {len(set(ids))}.")
+
+    cache_key = f"fpl_squad_v1__{'_'.join(map(str, sorted(ids)))}__{bank}"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < SQUAD_TTL:
+        cached["cached"] = True
+        return cached
+
+    fpl   = _get_fpl_data()
+    teams = fpl["teams"]
+    by_id = {p["id"]: p for p in fpl["players"]}
+
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        raise HTTPException(404, f"Unknown FPL player ID(s): {missing}")
+
+    fixture_cache: dict = {}
+    squad = [_score_player(by_id[i], teams, fixture_cache) for i in ids]
+
+    counts = {"GKP": 0, "DEF": 0, "MID": 0, "FWD": 0}
+    for p in squad:
+        counts[p["position"]] = counts.get(p["position"], 0) + 1
+    if counts != SQUAD_COMPOSITION:
+        raise HTTPException(
+            400,
+            f"Squad must be 2 GKP / 5 DEF / 5 MID / 3 FWD. Got "
+            f"{counts['GKP']} GKP / {counts['DEF']} DEF / {counts['MID']} MID / {counts['FWD']} FWD."
+        )
+
+    starting, bench, formation = _best_starting_xi(squad)
+    ranked_starting = sorted(starting, key=lambda p: p["weighted_score"], reverse=True)
+    captain    = ranked_starting[0]
+    vice       = ranked_starting[1] if len(ranked_starting) > 1 else None
+
+    # ── Transfer suggestions ──────────────────────────────────────────────────
+    pos_id_map = {"GKP": 1, "DEF": 2, "MID": 3, "FWD": 4}
+    squad_ids  = set(ids)
+    transfer_suggestions = []
+
+    for out_p in squad:
+        pos_id      = pos_id_map[out_p["position"]]
+        max_budget  = round(out_p["price"] + bank, 1)
+        is_flagged  = out_p["status"] in BAD_STATUS
+
+        raw_candidates = [
+            c for c in fpl["players"]
+            if c.get("element_type") == pos_id
+            and c.get("id") not in squad_ids
+            and c.get("status") == "a"
+            and int(c.get("minutes") or 0) > 450
+            and (c.get("now_cost") or 0) / 10 <= max_budget
+        ]
+        # cheap pre-sort by raw fpl_score, only fixture-score the top few
+        raw_candidates.sort(key=lambda c: _fpl_score(c), reverse=True)
+        top_raw = raw_candidates[:8]
+        scored_candidates = [_score_player(c, teams, fixture_cache) for c in top_raw]
+        scored_candidates.sort(key=lambda p: p["weighted_score"], reverse=True)
+
+        if not scored_candidates:
+            continue
+        best_candidate = scored_candidates[0]
+
+        is_upgrade = best_candidate["weighted_score"] >= out_p["weighted_score"] * UPGRADE_THRESHOLD
+        if not (is_flagged or is_upgrade):
+            continue
+
+        if is_flagged:
+            status_label = {"i": "injured", "s": "suspended", "u": "unavailable", "n": "not eligible"}
+            reason = (f"{out_p['name']} is {status_label.get(out_p['status'], 'flagged')} "
+                      f"({out_p['news'] or 'no fitness update'}). ")
+        else:
+            reason = f"{out_p['name']}'s score ({out_p['weighted_score']}) is below reach. "
+        reason += (f"{best_candidate['name']} ({best_candidate['team']}, £{best_candidate['price']}m) "
+                   f"scores {best_candidate['weighted_score']} with a "
+                   f"{_fdr_label(best_candidate['next_fixture'].get('fdr', 3)).lower()} fixture "
+                   f"and fits your budget (£{max_budget}m).")
+
+        transfer_suggestions.append({
+            "out": out_p,
+            "in": best_candidate,
+            "reason": reason,
+            "flagged": is_flagged,
+        })
+
+    transfer_suggestions.sort(key=lambda t: (not t["flagged"],
+                               -(t["in"]["weighted_score"] - t["out"]["weighted_score"])))
+
+    squad_value = round(sum(p["price"] for p in squad), 1)
+    cap_text = (f"🎯 My Squad Captain Pick: {captain['name']} ({captain['team']})\n"
+                f"{formation} · squad value £{squad_value}m + £{bank}m bank\n")
+    if transfer_suggestions:
+        t = transfer_suggestions[0]
+        cap_text += f"Suggested transfer: {t['out']['name']} ➡ {t['in']['name']}\n"
+    cap_text += "via @TacticaEngine · app.tactica.com.ng/fpl #FPL #MySquad"
+
+    result = {
+        "formation": formation,
+        "starting_xi": starting,
+        "bench": bench,
+        "captain": captain,
+        "vice_captain": vice,
+        "squad_value": squad_value,
+        "bank": bank,
+        "transfer_suggestions": transfer_suggestions,
+        "share_text": cap_text,
         "cached": False, "_cached_at": time.time(),
     }
     cache_write(cache_key, result)
