@@ -37,27 +37,84 @@ CAP_TTL  = 1800
 TRANS_TTL= 3600
 DIFF_TTL = 1800
 
-# ── FPL team display-name → BSD search name ───────────────────────────────────
-# FPL's own team id ordering is reshuffled every season (never stable), so it
-# must never be used as a lookup key. FPL's "name" field is stable and mostly
-# matches BSD already — this only overrides the handful that are abbreviated.
-FPL_NAME_TO_BSD: dict[str, str] = {
-    "Man City":      "Manchester City",
-    "Man Utd":       "Manchester United",
-    "Spurs":         "Tottenham Hotspur",
-    "Nott'm Forest": "Nottingham Forest",
-    "Wolves":        "Wolverhampton",
-    "Leeds":         "Leeds United",
-    "Newcastle":     "Newcastle United",
-    "West Ham":      "West Ham United",
+# ── One canonical club registry, used everywhere ──────────────────────────────
+# The confirmed 20 Premier League clubs for 2026/27. This is the single source
+# of truth for display names — matches the frontend PL_TEAMS dropdown exactly.
+PL_CANONICAL_TEAMS: list[str] = [
+    "Arsenal", "Aston Villa", "Bournemouth", "Brentford", "Brighton & Hove Albion",
+    "Chelsea", "Coventry City", "Crystal Palace", "Everton", "Fulham",
+    "Hull City", "Ipswich Town", "Leeds United", "Liverpool", "Manchester City",
+    "Manchester United", "Newcastle United", "Nottingham Forest", "Sunderland",
+    "Tottenham Hotspur",
+]
+
+# Short/abbreviated forms that share no useful substring with the canonical
+# name (so simple substring matching below won't catch them) — covers both
+# FPL's abbreviated "name" field and common shorthand.
+_CLUB_SHORT_ALIASES: dict[str, str] = {
+    "man city":      "Manchester City",
+    "man utd":       "Manchester United",
+    "man united":    "Manchester United",
+    "spurs":         "Tottenham Hotspur",
+    "nott'm forest": "Nottingham Forest",
+    "notts forest":  "Nottingham Forest",
+    "forest":        "Nottingham Forest",
+    "newcastle":     "Newcastle United",
+    "leeds":         "Leeds United",
+    "hull":          "Hull City",
+    "ipswich":       "Ipswich Town",
+    "coventry":      "Coventry City",
+    "sunderland afc":"Sunderland",
+    "brighton":      "Brighton & Hove Albion",
+    "bournemouth":   "Bournemouth",
+    "afc bournemouth":"Bournemouth",
 }
 
+def _normalize_club(s: str) -> str:
+    s = (s or "").lower().strip()
+    for junk in (" & ", " and ", "afc ", " afc", "f.c.", " fc"):
+        s = s.replace(junk, " ")
+    return " ".join(s.split())
+
+def _canonical_club(raw: str) -> str:
+    """Map any spelling/abbreviation (FPL's, BSD's, or ours) of a club name to
+    our single canonical full name. Falls back to the input unchanged if no
+    match is found, rather than silently returning 'Unknown'."""
+    if not raw:
+        return raw
+    norm = _normalize_club(raw)
+    if norm in _CLUB_SHORT_ALIASES:
+        return _CLUB_SHORT_ALIASES[norm]
+    for canon in PL_CANONICAL_TEAMS:
+        cn = _normalize_club(canon)
+        if norm == cn or norm in cn or cn in norm:
+            return canon
+    return raw
+
 def _bsd_name(team_name: str) -> str:
-    return FPL_NAME_TO_BSD.get(team_name, team_name)
+    """Kept as a thin alias so existing call sites don't need touching."""
+    return _canonical_club(team_name)
+
+def _bsd_lookup(canonical_name: str):
+    """Resolve a canonical club name to a BSD team id, retrying with looser
+    forms if the exact full name doesn't match BSD's own naming convention.
+    Returns (bsd_team_id, bsd_name) or (None, None)."""
+    team_id, name = bsd_find_team(canonical_name)
+    if team_id:
+        return team_id, name
+    # BSD may store this club under a shorter/different form — try the first
+    # word alone (e.g. "Tottenham" instead of "Tottenham Hotspur").
+    first_word = canonical_name.split()[0]
+    if first_word != canonical_name:
+        team_id, name = bsd_find_team(first_word)
+        if team_id:
+            return team_id, name
+    return None, None
 
 def _team_name(teams: dict, team_id) -> str:
     """teams.get(int) can miss if dict keys came back as strings after a cache
-    round-trip — check both key forms before giving up."""
+    round-trip — check both key forms before giving up. Always returns our
+    canonical full name so display is consistent across every tab."""
     if team_id is None:
         return "Unknown"
     name = teams.get(team_id) or teams.get(str(team_id))
@@ -66,7 +123,7 @@ def _team_name(teams: dict, team_id) -> str:
             name = teams.get(int(team_id))
         except (TypeError, ValueError):
             name = None
-    return name or "Unknown"
+    return _canonical_club(name) if name else "Unknown"
 
 # FPL position codes
 POS_MAP = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -329,7 +386,7 @@ def fixture_ticker(
     gws:   int  = Query(38, description="Gameweeks to show", ge=1, le=50),
     debug: bool = Query(False, description="Return raw unfiltered BSD fixture data for diagnosis"),
 ):
-    team_id, bsd_name = bsd_find_team(team)
+    team_id, bsd_name = _bsd_lookup(_canonical_club(team))
     if not team_id:
         raise HTTPException(404, f"Team '{team}' not found.")
 
@@ -454,7 +511,7 @@ def captain_pick(
 
     team_name = _team_name(teams, fpl_team_id)
 
-    bsd_team_id, _ = bsd_find_team(_bsd_name(team_name))
+    bsd_team_id, _ = _bsd_lookup(_bsd_name(team_name))
     nf  = _next_fixture(bsd_team_id) if bsd_team_id else {}
     fdr = nf.get("fdr", 3)
 
@@ -536,7 +593,7 @@ def transfer_recommender(
     for p in candidates_raw:
         tid  = p.get("team")
         if tid not in team_fixtures:
-            bsd_id, _ = bsd_find_team(_bsd_name(_team_name(teams, tid)))
+            bsd_id, _ = _bsd_lookup(_bsd_name(_team_name(teams, tid)))
             team_fixtures[tid] = _next_fixture(bsd_id) if bsd_id else {}
         nf      = team_fixtures[tid]
         fdr     = nf.get("fdr", 3)
@@ -615,7 +672,7 @@ def differential_finder(
     for p in candidates_raw:
         tid = p.get("team")
         if tid not in team_fixtures:
-            bsd_id, _ = bsd_find_team(_bsd_name(_team_name(teams, tid)))
+            bsd_id, _ = _bsd_lookup(_bsd_name(_team_name(teams, tid)))
             team_fixtures[tid] = _next_fixture(bsd_id) if bsd_id else {}
         nf  = team_fixtures[tid]
         fdr = nf.get("fdr", 3)
@@ -672,7 +729,7 @@ BAD_STATUS = {"i", "s", "u", "n"}  # injured / suspended / unavailable / not eli
 
 def _team_next_fixture_cached(team_id: int, teams: dict, cache: dict) -> dict:
     if team_id not in cache:
-        bsd_id, _ = bsd_find_team(_bsd_name(_team_name(teams, team_id)))
+        bsd_id, _ = _bsd_lookup(_bsd_name(_team_name(teams, team_id)))
         cache[team_id] = _next_fixture(bsd_id) if bsd_id else {}
     return cache[team_id]
 
