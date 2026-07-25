@@ -37,29 +37,36 @@ CAP_TTL  = 1800
 TRANS_TTL= 3600
 DIFF_TTL = 1800
 
-# ── FPL team_id → BSD search name ────────────────────────────────────────────
-FPL_TEAM_TO_BSD: dict[int, str] = {
-    1:  "Arsenal",
-    2:  "Aston Villa",
-    3:  "Brentford",
-    4:  "Brighton & Hove Albion",
-    5:  "Bournemouth",
-    6:  "Chelsea",
-    7:  "Coventry City",
-    8:  "Crystal Palace",
-    9:  "Everton",
-    10: "Fulham",
-    11: "Hull City",
-    12: "Ipswich Town",
-    13: "Leeds United",
-    14: "Liverpool",
-    15: "Manchester City",
-    16: "Manchester United",
-    17: "Newcastle United",
-    18: "Nottingham Forest",
-    19: "Sunderland",
-    20: "Tottenham Hotspur",
+# ── FPL team display-name → BSD search name ───────────────────────────────────
+# FPL's own team id ordering is reshuffled every season (never stable), so it
+# must never be used as a lookup key. FPL's "name" field is stable and mostly
+# matches BSD already — this only overrides the handful that are abbreviated.
+FPL_NAME_TO_BSD: dict[str, str] = {
+    "Man City":      "Manchester City",
+    "Man Utd":       "Manchester United",
+    "Spurs":         "Tottenham Hotspur",
+    "Nott'm Forest": "Nottingham Forest",
+    "Wolves":        "Wolverhampton",
+    "Leeds":         "Leeds United",
+    "Newcastle":     "Newcastle United",
+    "West Ham":      "West Ham United",
 }
+
+def _bsd_name(team_name: str) -> str:
+    return FPL_NAME_TO_BSD.get(team_name, team_name)
+
+def _team_name(teams: dict, team_id) -> str:
+    """teams.get(int) can miss if dict keys came back as strings after a cache
+    round-trip — check both key forms before giving up."""
+    if team_id is None:
+        return "Unknown"
+    name = teams.get(team_id) or teams.get(str(team_id))
+    if name is None:
+        try:
+            name = teams.get(int(team_id))
+        except (TypeError, ValueError):
+            name = None
+    return name or "Unknown"
 
 # FPL position codes
 POS_MAP = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -215,7 +222,7 @@ def _build_player(p: dict, teams: dict) -> dict:
         "name":        p.get("known_name") or p.get("web_name") or
                        f"{p.get('first_name','')} {p.get('second_name','')}".strip(),
         "team_id":     p.get("team"),
-        "team":        teams.get(p.get("team",""), "Unknown"),
+        "team":        _team_name(teams, p.get("team")),
         "position":    POS_MAP.get(p.get("element_type"), "UNK"),
         "pos_id":      p.get("element_type"),
         "price":       round((p.get("now_cost") or 0) / 10, 1),
@@ -267,7 +274,7 @@ def player_list():
             "id":       p.get("id"),
             "name":     p.get("known_name") or p.get("web_name") or
                         f"{p.get('first_name','')} {p.get('second_name','')}".strip(),
-            "team":     teams.get(p.get("team",""), "Unknown"),
+            "team":     _team_name(teams, p.get("team")),
             "position": POS_MAP.get(p.get("element_type"), "UNK"),
             "price":    round((p.get("now_cost") or 0) / 10, 1),
             "status":   p.get("status", "a"),
@@ -393,11 +400,9 @@ def captain_pick(
     if not fpl_team_id:
         raise HTTPException(404, f"'{team}' not found in FPL data.")
 
-    team_name = teams[fpl_team_id]
+    team_name = _team_name(teams, fpl_team_id)
 
-    bsd_team_id, _ = bsd_find_team(
-        FPL_TEAM_TO_BSD.get(fpl_team_id, team_name)
-    )
+    bsd_team_id, _ = bsd_find_team(_bsd_name(team_name))
     nf  = _next_fixture(bsd_team_id) if bsd_team_id else {}
     fdr = nf.get("fdr", 3)
 
@@ -479,7 +484,7 @@ def transfer_recommender(
     for p in candidates_raw:
         tid  = p.get("team")
         if tid not in team_fixtures:
-            bsd_id, _ = bsd_find_team(FPL_TEAM_TO_BSD.get(tid, teams.get(tid,"")))
+            bsd_id, _ = bsd_find_team(_bsd_name(_team_name(teams, tid)))
             team_fixtures[tid] = _next_fixture(bsd_id) if bsd_id else {}
         nf      = team_fixtures[tid]
         fdr     = nf.get("fdr", 3)
@@ -558,7 +563,7 @@ def differential_finder(
     for p in candidates_raw:
         tid = p.get("team")
         if tid not in team_fixtures:
-            bsd_id, _ = bsd_find_team(FPL_TEAM_TO_BSD.get(tid, teams.get(tid,"")))
+            bsd_id, _ = bsd_find_team(_bsd_name(_team_name(teams, tid)))
             team_fixtures[tid] = _next_fixture(bsd_id) if bsd_id else {}
         nf  = team_fixtures[tid]
         fdr = nf.get("fdr", 3)
@@ -615,7 +620,7 @@ BAD_STATUS = {"i", "s", "u", "n"}  # injured / suspended / unavailable / not eli
 
 def _team_next_fixture_cached(team_id: int, teams: dict, cache: dict) -> dict:
     if team_id not in cache:
-        bsd_id, _ = bsd_find_team(FPL_TEAM_TO_BSD.get(team_id, teams.get(team_id, "")))
+        bsd_id, _ = bsd_find_team(_bsd_name(_team_name(teams, team_id)))
         cache[team_id] = _next_fixture(bsd_id) if bsd_id else {}
     return cache[team_id]
 
