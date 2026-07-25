@@ -509,6 +509,13 @@ def captain_pick(
     if not fpl_team_id:
         raise HTTPException(404, f"'{team}' not found in FPL data.")
 
+    # teams.items() keys can come back as strings after a cache round-trip;
+    # player records always use int team ids — normalize before comparing.
+    try:
+        fpl_team_id = int(fpl_team_id)
+    except (TypeError, ValueError):
+        pass
+
     team_name = _team_name(teams, fpl_team_id)
 
     bsd_team_id, _ = _bsd_lookup(_bsd_name(team_name))
@@ -518,10 +525,12 @@ def captain_pick(
     squad = [
         _build_player(p, teams)
         for p in fpl["players"]
-        if p.get("team") == fpl_team_id
+        if int(p.get("team") or -1) == fpl_team_id
         and p.get("element_type") in {3, 4}
         and p.get("status") != "u"
-        and int(p.get("minutes") or 0) > 0
+        # Pre-season every player shows 0 minutes — don't require minutes
+        # already played, just that they're an active squad player.
+        and (p.get("status") == "a" or int(p.get("minutes") or 0) > 0)
     ]
 
     if not squad:
@@ -584,7 +593,7 @@ def transfer_recommender(
         if p.get("element_type") == pos_id
         and p.get("status") != "u"
         and min_price <= (p.get("now_cost") or 0) / 10 <= max_price
-        and int(p.get("minutes") or 0) > 0
+        and (p.get("status") == "a" or int(p.get("minutes") or 0) > 0)
     ]
 
     team_fixtures: dict[int, dict] = {}
@@ -662,8 +671,10 @@ def differential_finder(
         and p.get("status") != "u"
         and float(p.get("selected_by_percent") or 0) <= max_ownership
         and (p.get("now_cost") or 0) / 10 <= max_price
-        and int(p.get("minutes") or 0) > 450
-        and float(p.get("points_per_game") or 0) >= 3.0
+        and (
+            p.get("status") == "a"
+            or (int(p.get("minutes") or 0) > 450 and float(p.get("points_per_game") or 0) >= 3.0)
+        )
     ]
 
     team_fixtures: dict[int, dict] = {}
@@ -849,7 +860,6 @@ def squad_analysis(
             if c.get("element_type") == pos_id
             and c.get("id") not in squad_ids
             and c.get("status") == "a"
-            and int(c.get("minutes") or 0) > 450
             and (c.get("now_cost") or 0) / 10 <= max_budget
         ]
         # cheap pre-sort by raw fpl_score, only fixture-score the top few
