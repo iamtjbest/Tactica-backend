@@ -291,23 +291,17 @@ def player_list():
 
 @router.get("/fpl/fixtures")
 def fixture_ticker(
-    team: str = Query(..., description="Club name e.g. Arsenal, Liverpool"),
-    gws:  int = Query(38, description="Gameweeks to show", ge=1, le=50),
+    team:  str  = Query(..., description="Club name e.g. Arsenal, Liverpool"),
+    gws:   int  = Query(38, description="Gameweeks to show", ge=1, le=50),
+    debug: bool = Query(False, description="Return raw unfiltered BSD fixture data for diagnosis"),
 ):
-    # Bumped to v6 to immediately flush out your 404 cached error
-    cache_key = f"fpl_fixtures_v6__{team.lower().replace(' ','_')}"
-    cached    = cache_read(cache_key)
-    if cached and cache_age(cached) < FDR_TTL:
-        cached["cached"] = True
-        return cached
-
     team_id, bsd_name = bsd_find_team(team)
     if not team_id:
         raise HTTPException(404, f"Team '{team}' not found.")
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
-    
+
     for params in [
         {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today},
         {"limit": min(gws+30, 200), "date_from": today},
@@ -320,6 +314,21 @@ def fixture_ticker(
             if r:
                 raw = r
                 break
+
+    if debug:
+        # Return the first 2 raw fixtures completely unfiltered so we can see
+        # exactly which fields BSD populates on not-yet-started fixtures.
+        return {
+            "team": team, "bsd_team_id": team_id, "bsd_name": bsd_name,
+            "raw_count": len(raw), "sample": raw[:2],
+        }
+
+    # Bumped to v6 to immediately flush out your 404 cached error
+    cache_key = f"fpl_fixtures_v6__{team.lower().replace(' ','_')}"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < FDR_TTL:
+        cached["cached"] = True
+        return cached
 
     # Filtering exclusively by league ID locally
     pl_matches = [fix for fix in raw if _is_pl(fix)]
@@ -389,12 +398,14 @@ def captain_pick(
 
     fpl_team_id = None
     for tid, tname in teams.items():
-        if tname.lower() == team.lower() or tname.lower().startswith(team.lower()[:4]):
+        canonical = _bsd_name(tname)
+        if canonical.lower() == team.lower() or canonical.lower().startswith(team.lower()[:4]):
             fpl_team_id = tid
             break
     if not fpl_team_id:
         for tid, tname in teams.items():
-            if team.lower() in tname.lower() or tname.lower() in team.lower():
+            canonical = _bsd_name(tname)
+            if team.lower() in canonical.lower() or canonical.lower() in team.lower():
                 fpl_team_id = tid
                 break
     if not fpl_team_id:
