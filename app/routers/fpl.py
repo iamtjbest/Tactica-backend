@@ -101,11 +101,36 @@ def _get_fpl_data() -> dict:
 
 # ── BSD fixture helpers ───────────────────────────────────────────────────────
 
+PL_LEAGUE_ID_TTL = 86400  # league IDs don't change; refresh daily just in case
+
+def _get_pl_league_id() -> int | None:
+    """Resolve the Premier League's real BSD league_id from /api/v2/leagues/
+    instead of guessing a hardcoded number. Cached for a day."""
+    cache_key = "bsd_pl_league_id_v1"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < PL_LEAGUE_ID_TTL:
+        return cached.get("league_id")
+    try:
+        data    = bsd_get("/leagues/", params={"country": "England", "limit": 200})
+        leagues = data if isinstance(data, list) else (data or {}).get("results", [])
+        for lg in leagues:
+            if not lg.get("is_women") and (lg.get("name") or "").strip().lower() == "premier league":
+                league_id = lg.get("id")
+                cache_write(cache_key, {"league_id": league_id, "_cached_at": time.time()})
+                return league_id
+    except Exception:
+        pass
+    return None
+
 def _is_pl(fix: dict) -> bool:
-    """Strictly use the League ID to identify genuine EPL matches."""
-    l_id = str(fix.get("league_id", ""))
-    c_id = str(fix.get("competition_id", ""))
-    return l_id == "39" or c_id == "39"
+    """BSD v2 events only carry `league_id` (no `competition_id` field exists
+    in the schema) — match it against the real, looked-up Premier League id."""
+    pl_id = _get_pl_league_id()
+    if pl_id is not None:
+        return fix.get("league_id") == pl_id
+    # Lookup failed (BSD unreachable etc.) — fall back to the old guess
+    # rather than silently returning zero fixtures for everyone.
+    return str(fix.get("league_id", "")) == "39"
 
 def _fdr(defence: int, is_away: bool) -> int:
     """Original FDR math formula applied to normalized scores."""
@@ -123,12 +148,15 @@ EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 
 def _get_opponent_defence(opp_id: int) -> int:
     try:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
-        # Standard parameters without breaking the endpoint
-        data = bsd_get(f"/teams/{opp_id}/fixtures/", params={
+        now    = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+        params = {
             "status": "finished", "limit": 40,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
-        })
+        }
+        pl_id = _get_pl_league_id()
+        if pl_id is not None:
+            params["league_id"] = pl_id
+        data = bsd_get(f"/teams/{opp_id}/fixtures/", params=params)
         if not data:
             return 45  # Standard fallback mapping to FDR 3
             
@@ -161,11 +189,17 @@ def _get_opponent_defence(opp_id: int) -> int:
 def _next_fixture(bsd_team_id: int) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
-    
-    for params in [
+    pl_id = _get_pl_league_id()
+
+    param_sets = [
         {"status": "notstarted", "limit": 15, "date_from": today},
         {"limit": 20, "date_from": today},
-    ]:
+    ]
+    if pl_id is not None:
+        for p in param_sets:
+            p["league_id"] = pl_id
+
+    for params in param_sets:
         d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
         if d:
             f = d if isinstance(d, list) else d.get("results", [])
@@ -301,12 +335,18 @@ def fixture_ticker(
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw   = []
+    pl_id = _get_pl_league_id()
 
-    for params in [
+    param_sets = [
         {"status": "notstarted", "limit": min(gws+30, 200), "date_from": today},
         {"limit": min(gws+30, 200), "date_from": today},
         {"team_id": team_id, "date_from": today, "status":"notstarted","limit":min(gws+30, 200)},
-    ]:
+    ]
+    if pl_id is not None:
+        for p in param_sets:
+            p["league_id"] = pl_id
+
+    for params in param_sets:
         path = f"/teams/{team_id}/fixtures/" if "team_id" not in params else "/events/"
         d    = bsd_get(path, params=params)
         if d:
@@ -320,6 +360,7 @@ def fixture_ticker(
         # exactly which fields BSD populates on not-yet-started fixtures.
         return {
             "team": team, "bsd_team_id": team_id, "bsd_name": bsd_name,
+            "resolved_pl_league_id": pl_id,
             "raw_count": len(raw), "sample": raw[:2],
         }
 
