@@ -123,7 +123,7 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
     Fuzzy-matches the closest name from any results returned.
     """
     def _search_and_match(query: str) -> tuple[int | None, str | None]:
-        data = bsd_get("/teams/", params={"name": query, "limit": 15})
+        data = bsd_get("/teams/", params={"name": query, "limit": 50})
         if not data:
             return None, None
         results = data.get("results", [])
