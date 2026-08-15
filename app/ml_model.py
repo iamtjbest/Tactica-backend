@@ -192,6 +192,19 @@ def score_all_formations(
       -5%  if opponent's 5-ATB typically exploits 3-at-back shapes
       -3%  if opponent's 3-at-back typically exploits standard 4-back shapes
     """
+    # First, compute Team B's max raw probability to use as a normalizer
+    opp_raw_probs = []
+    for code, name in FORMATIONS.items():
+        test_opp = pd.DataFrame({
+            "Formation":    [code],
+            "Team_Attack":  [float(opp_att)],
+            "Team_Defense": [float(opp_def)],
+            "Opp_Attack":   [float(team_att)],
+            "Opp_Defense":  [float(team_def)],
+        })
+        opp_raw_probs.append(model.predict_proba(test_opp)[0][1])
+    raw_B_max = max(opp_raw_probs) if opp_raw_probs else 0.5
+
     results = []
     for code, name in FORMATIONS.items():
         test = pd.DataFrame({
@@ -201,7 +214,14 @@ def score_all_formations(
             "Opp_Attack":   [float(opp_att)],
             "Opp_Defense":  [float(opp_def)],
         })
-        prob = float(model.predict_proba(test)[0][1] * 100)
+        raw_A = model.predict_proba(test)[0][1]
+
+        # Normalise to zero-sum: P(A) + P(B) + P(Draw) = 100%
+        # We use a base draw weight of 0.30 (representing ~20-25% draw chance after normalisation)
+        draw_weight = 0.30
+        total_weight = raw_A + raw_B_max + draw_weight
+        
+        prob = (raw_A / total_weight) * 100.0
 
         # +5% if team already plays this formation regularly
         if familiarity_bonus and name == familiarity_bonus:
