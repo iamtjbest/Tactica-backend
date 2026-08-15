@@ -29,8 +29,8 @@ FORM_TTL = 3600   # 1 hour
 # NOTE: BSD returns fixtures ASCENDING by default — we sort DESC in Python.
 # With limit=20 and a wide window, BSD returned the oldest 20 (Aug-Nov) and
 # the most recent May fixtures were never fetched. Raising to 50 fixes this.
-SEASON_START = "2025-08-01T00:00:00Z"
-FORM_LIMIT   = 50
+SEASON_START = "2026-08-01T00:00:00Z"
+FORM_LIMIT   = 80
 
 
 def _dynamic_ratings(matches: list) -> tuple[int, int]:
