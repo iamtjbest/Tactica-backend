@@ -2,10 +2,14 @@
 
 ## Stack
 - **FastAPI** — REST API framework
-- **Railway** — hosting (free tier, persistent storage)
+- **Render** — hosting (web service)
 - **BSD API** — football data (live scores, squads, formations, World Cup)
 - **Gemini API** — AI tactical chat
 - **scikit-learn** — ML formation prediction
+
+## Recent Updates
+- **Zero-Sum ML Probability**: Win probabilities are now mathematically constrained by the opponent's max raw strength, ensuring the probabilities for a single match always sum to `< 100%` (allowing for a draw probability).
+- **Match Form Limits**: Increased `FORM_LIMIT` to 80 ensures that busy teams (50+ matches) don't have their most recent competitive games and friendlies cut off from the historical window.
 
 ## Project Structure
 ```
@@ -25,8 +29,6 @@ tactica-backend/
 │       ├── form.py          # GET  /api/form
 │       └── nations.py       # GET/POST /api/nations/*
 ├── requirements.txt
-├── Procfile
-└── railway.json
 ```
 
 ## API Endpoints
@@ -44,21 +46,21 @@ tactica-backend/
 | GET | `/api/nations/squads/{id}` | One nation's squad |
 | POST | `/api/nations/predict` | National team formation prediction |
 
-## Deploy to Railway
+## Deploy to Render
 
 1. Push this folder to a GitHub repo
-2. Go to railway.app → New Project → Deploy from GitHub
-3. Add environment variables:
+2. Go to [Render.com](https://render.com) → New Web Service → Connect GitHub repo
+3. Set the build command to `pip install -r requirements.txt` and start command to `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+4. Add environment variables:
    ```
    BSD_API_KEY=your_bsd_key
    GEMINI_API_KEY=your_gemini_key
    MODEL_PATH=tactical_model.pkl
    TEAMS_PATH=teams.json
    PLAYERS_PATH=players.json
-   CACHE_DIR=/tmp/tactica_cache
    ```
-4. Copy `tactical_model.pkl`, `teams.json`, `players.json` to the repo root
-5. Railway auto-deploys on every push
+5. Copy `tactical_model.pkl`, `teams.json`, `players.json` to the repo root
+6. Render auto-deploys on every push to your main branch
 
 ## Local Development
 ```bash
