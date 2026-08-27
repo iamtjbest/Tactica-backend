@@ -192,7 +192,7 @@ def _is_pl(fix: dict) -> bool:
 def _fdr(defence: int, is_away: bool) -> int:
     """Original FDR math formula applied to normalized scores."""
     base = defence + (5 if is_away else 0)
-    return max(1, min(5, 1 + int(base // 21)))
+    return max(2, min(5, 1 + int(base // 21)))
 
 def _fdr_label(fdr: int) -> str:
     return "Easy" if fdr <= 2 else ("Medium" if fdr == 3 else "Hard")
@@ -234,11 +234,8 @@ def _get_opponent_defence(opp_id: int) -> int:
         if matches:
             _, defence = _dynamic_ratings(matches)
             
-            # Normalize Elo-style ratings strictly down to the 20-90 scale
-            if defence > 100:
-                defence = 20 + ((defence - 1000) / 1000) * 60
-                
-            return int(max(10, min(90, defence)))
+            # Use Dixon‑Coles based rating directly; already clamped to 10‑90 in _dynamic_ratings
+            return int(defence)
     except Exception:
         pass
     return 45

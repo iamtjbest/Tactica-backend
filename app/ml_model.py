@@ -20,7 +20,13 @@ BUGS FIXED (v2):
 import os, json
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+try:
+    from sklearn.ensemble import RandomForestClassifier
+except Exception:  # pragma: no cover
+    class RandomForestClassifier:  # minimal stub
+        def __init__(self, *args, **kwargs):
+            raise ImportError('scikit-learn is not installed; RandomForestClassifier unavailable')
+
 import joblib
 
 from app.config import FORMATIONS, FORMATION_NAME_TO_CODE
