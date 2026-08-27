@@ -33,7 +33,6 @@ app.add_middleware(
         "https://app.tactica.com.ng",      # the engine (production)
         "https://tactica.com.ng",          # marketing site
         "https://www.tactica.com.ng",      # marketing site (www)
-        "http://localhost:3000",           # local dev testing
         "https://tactica-backend-hdbd.onrender.com",
     ],
     # Also allow any Vercel preview deployment URL (changes every push)
