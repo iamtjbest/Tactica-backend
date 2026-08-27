@@ -17,7 +17,6 @@ import time
 import os
 USE_DUMMY_DATA = os.getenv('USE_DUMMY_DATA', 'False') == 'True'
 from fastapi import APIRouter, Query, HTTPException
-            super().__init__(detail)
 from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
                         cache_age, LEAGUE_NAMES)
 
