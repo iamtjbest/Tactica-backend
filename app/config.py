@@ -120,7 +120,11 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
       2. If empty results, search first significant word (e.g. 'Bayern' from 'Bayern Munich')
          — handles clubs whose BSD name differs (FC Bayern München vs Bayern Munich)
       3. If still empty, search first two words
+<<<<<<< HEAD
     Fuzzy-matches the closest name from any results returned.
+=======
+      4. Additional fallbacks: try appending common suffixes like 'FC', 'United', and prefix 'FC '
+>>>>>>> master
     """
     def _search_and_match(query: str) -> tuple[int | None, str | None]:
         data = bsd_get("/teams/", params={"name": query, "limit": 50})
@@ -158,6 +162,21 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         if tid:
             return tid, bname
 
+<<<<<<< HEAD
+=======
+    # Strategy 4: common suffixes/prefixes
+    suffixes = [" FC", " United", " City", " AFC"]
+    for suff in suffixes:
+        tid, bname = _search_and_match(name + suff)
+        if tid:
+            return tid, bname
+    prefixes = ["FC ", "AFC "]
+    for pref in prefixes:
+        tid, bname = _search_and_match(pref + name)
+        if tid:
+            return tid, bname
+
+>>>>>>> master
     return None, None
 
 # ── Cache helpers (file-based, Railway persists /app volume) ─────────────────
