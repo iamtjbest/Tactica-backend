@@ -45,7 +45,7 @@ FORM_TTL = 3600   # 1 hour
 # NOTE: BSD returns fixtures ASCENDING by default — we sort DESC in Python.
 # With limit=20 and a wide window, BSD returned the oldest 20 (Aug-Nov) and
 # the most recent May fixtures were never fetched. Raising to 50 fixes this.
-SEASON_START = "2026-06-01T00:00:00Z"
+SEASON_START = "2026-03-01T00:00:00Z"
 FORM_LIMIT   = 80
 
 
@@ -101,7 +101,7 @@ def _fixture_date(fix: dict) -> str:
 
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
-    cache_key = f"form_v2__{team.lower().replace(' ', '_')}"
+    cache_key = f"form_v3__{team.lower().replace(' ', '_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FORM_TTL:
         cached["cached"] = True
@@ -162,7 +162,7 @@ def form(team: str = Query(..., description="Team name")):
     # Sort descending by date in Python — BSD may return ASC
     # Sort descending by date in Python — BSD may return ASC
     fixtures.sort(key=_fixture_date, reverse=True)
-    fixtures = fixtures[:10]   # true up to 10 most recent for decay weighting
+    fixtures = fixtures[:5]   # limit to last 5 finished matches
 
     matches = []
     for fix in fixtures:
