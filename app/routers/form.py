@@ -17,8 +17,7 @@ import time
 import os
 USE_DUMMY_DATA = os.getenv('USE_DUMMY_DATA', 'False') == 'True'
 from fastapi import APIRouter, Query, HTTPException
-from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
-                        cache_age, LEAGUE_NAMES)
+from app.config import (bsd_get, bsd_find_team, cache_read, cache_write, cache_age, LEAGUE_NAMES)
 
 def _get_team_primary_league(team_id: int) -> int | None:
     """Return the primary league_id for a team (e.g., Premier League).
