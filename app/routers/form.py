@@ -18,7 +18,8 @@ import os
 from datetime import datetime, timezone, timedelta
 USE_DUMMY_DATA = os.getenv('USE_DUMMY_DATA', 'False') == 'True'
 from fastapi import APIRouter, Query, HTTPException
-from app.config import (bsd_get, bsd_find_team, cache_read, cache_write, cache_age, LEAGUE_NAMES)
+from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
+                        cache_age, LEAGUE_NAMES)
 
 def _get_team_primary_league(team_id: int) -> int | None:
     """Return the primary league_id for a team (e.g., Premier League).
@@ -45,7 +46,7 @@ FORM_TTL = 3600   # 1 hour
 # NOTE: BSD returns fixtures ASCENDING by default — we sort DESC in Python.
 # With limit=20 and a wide window, BSD returned the oldest 20 (Aug-Nov) and
 # the most recent May fixtures were never fetched. Raising to 50 fixes this.
-SEASON_START = "2026-03-01T00:00:00Z"
+SEASON_START = "2025-08-01T00:00:00Z"  # widened to full 2025/26 season
 FORM_LIMIT   = 80
 
 
@@ -162,7 +163,7 @@ def form(team: str = Query(..., description="Team name")):
     # Sort descending by date in Python — BSD may return ASC
     # Sort descending by date in Python — BSD may return ASC
     fixtures.sort(key=_fixture_date, reverse=True)
-    fixtures = fixtures[:5]   # limit to last 5 finished matches
+    fixtures = fixtures[:10]   # true up to 10 most recent for decay weighting
 
     matches = []
     for fix in fixtures:
