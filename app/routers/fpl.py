@@ -190,9 +190,23 @@ def _is_pl(fix: dict) -> bool:
     return str(fix.get("league_id", "")) == "39"
 
 def _fdr(defence: int, is_away: bool) -> int:
-    """Original FDR math formula applied to normalized scores."""
-    base = defence + (5 if is_away else 0)
-    return max(2, min(5, 1 + int(base // 21)))
+    """Map _dynamic_ratings defence score (10-90) to FPL's 1-5 FDR scale.
+
+    Thresholds calibrated against FPL's own FDR ratings for 2026/27:
+      ≤30 → FDR 1 (very easy)   e.g. Como, Viking
+      ≤48 → FDR 2 (easy)        e.g. Coventry, Hull, newly promoted sides
+      ≤63 → FDR 3 (medium)      e.g. Brentford, average mid-table
+      ≤78 → FDR 4 (hard)        e.g. Arsenal, Chelsea, strong sides
+      >78  → FDR 5 (very hard)  e.g. Man City, Liverpool, elite
+    Away penalty reduced to +3 (was +5) — away games are harder but
+    the old +5 was pushing nearly every fixture into FDR 4-5.
+    """
+    adjusted = defence + (3 if is_away else 0)
+    if adjusted <= 30: return 1
+    if adjusted <= 48: return 2
+    if adjusted <= 63: return 3
+    if adjusted <= 78: return 4
+    return 5
 
 def _fdr_label(fdr: int) -> str:
     return "Easy" if fdr <= 2 else ("Medium" if fdr == 3 else "Hard")
@@ -291,6 +305,17 @@ def _next_fixture(bsd_team_id: int) -> dict:
 # ── FPL scoring helpers ───────────────────────────────────────────────────────
 
 def _fpl_score(p: dict) -> float:
+    """Season-aware FPL scoring.
+
+    Early season (mins < 90): ep_next dominates — only GW1 data exists,
+    so expected points next game is the most reliable signal.
+
+    Mid season (90-899 mins, ~1-9 GWs): blend form + ppg + underlying
+    stats. Form is the FPL rolling 5-GW average — reliable now.
+
+    Established season (900+ mins, ~10+ GWs): full weighting on all
+    metrics. xG/xA per 90 are meaningful with enough sample size.
+    """
     ppg   = float(p.get("points_per_game") or 0)
     xg90  = float(p.get("expected_goals_per_90") or 0)
     xa90  = float(p.get("expected_assists_per_90") or 0)
@@ -298,10 +323,15 @@ def _fpl_score(p: dict) -> float:
     ep    = float(p.get("ep_next") or 0)
     mins  = int(p.get("minutes") or 0)
 
-    if mins > 900:
+    if mins >= 900:
+        # 10+ GWs: full metric weighting
         score = ppg * 2.0 + xg90 * 3.0 + xa90 * 2.0 + form * 0.5 + ep * 0.3
+    elif mins >= 90:
+        # 1-9 GWs: form + ppg lead, xG/xA as supporting signals
+        score = form * 1.5 + ppg * 1.5 + xg90 * 1.5 + xa90 * 1.0 + ep * 0.5
     else:
-        score = ep * 1.0 + ppg * 1.0
+        # Pre-season / GW0: expected points only
+        score = ep * 1.5 + ppg * 0.5
     return round(score, 3)
 
 def _build_player(p: dict, teams: dict) -> dict:
@@ -332,7 +362,7 @@ def _build_player(p: dict, teams: dict) -> dict:
 def _reason_fpl(player: dict, fdr: int, fdr_label: str, opp: str, venue: str) -> str:
     parts = []
     if player["ppg"] >= 5.0:
-        parts.append(f"{player['ppg']} pts/game last season")
+        parts.append(f"{player['ppg']} pts/game this season")
     if player["xg90"] >= 0.3:
         parts.append(f"{player['xg90']:.2f} xG/90")
     if player["xa90"] >= 0.2:
@@ -419,7 +449,7 @@ def fixture_ticker(
         }
 
     # Bumped to v6 to immediately flush out your 404 cached error
-    cache_key = f"fpl_fixtures_v6__{team.lower().replace(' ','_')}"
+    cache_key = f"fpl_fixtures_v7__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
         cached["cached"] = True
@@ -482,7 +512,7 @@ def captain_pick(
     team: str = Query(..., description="FPL club name e.g. Arsenal"),
     top:  int = Query(5, ge=1, le=10),
 ):
-    cache_key = f"fpl_captain_v5__{team.lower().replace(' ','_')}"
+    cache_key = f"fpl_captain_v6__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < CAP_TTL:
         cached["cached"] = True
@@ -576,7 +606,7 @@ def transfer_recommender(
         raise HTTPException(400, "position must be GKP, DEF, MID, or FWD")
     pos_id = pos_id_map[pos_upper]
 
-    cache_key = f"fpl_trans_v3__{pos_upper}__{min_price}__{max_price}"
+    cache_key = f"fpl_trans_v4__{pos_upper}__{min_price}__{max_price}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < TRANS_TTL:
         cached["cached"] = True
@@ -653,7 +683,7 @@ def differential_finder(
         raise HTTPException(400, "position must be GKP, DEF, MID, or FWD")
     pos_id = pos_id_map[pos_upper]
 
-    cache_key = f"fpl_diff_v3__{pos_upper}__{max_ownership}__{max_price}"
+    cache_key = f"fpl_diff_v4__{pos_upper}__{max_ownership}__{max_price}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < DIFF_TTL:
         cached["cached"] = True
