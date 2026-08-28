@@ -31,13 +31,13 @@ from app.routers.form import _dynamic_ratings
 import unicodedata  # needed for diacritic‑insensitive normalisation
 
 
-def _team_counts(squad: list[dict]) -> dict[int, int]:
-    """Return a mapping of real‑life team_id to player count in the squad."""
-    counts: dict[int, int] = {}
+def _team_counts(squad: list[dict]) -> dict:
+    """Return a mapping of real‑life team name/id to player count in the squad."""
+    counts: dict = {}
     for p in squad:
-        team_id = p.get("team")
-        if isinstance(team_id, int):
-            counts[team_id] = counts.get(team_id, 0) + 1
+        t = p.get("team_id") if "team_id" in p else p.get("team")
+        if t:
+            counts[t] = counts.get(t, 0) + 1
     return counts
 
 def _current_gameweek() -> int:
@@ -371,6 +371,11 @@ def _get_opponent_defence(opp_id: int, opp_name: str = "") -> int:
     return _baseline_defence(opp_name)
 
 def _next_fixture(bsd_team_id: int) -> dict:
+    cache_key = f"fpl_next_fix_v1__{bsd_team_id}"
+    cached = cache_read(cache_key)
+    if cached and cache_age(cached) < FDR_TTL:
+        return cached
+
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     fixes = []
     pl_id = _get_pl_league_id()
@@ -395,7 +400,9 @@ def _next_fixture(bsd_team_id: int) -> dict:
                     break
                 
     if not fixes:
-        return {}
+        res: dict = {}
+        cache_write(cache_key, res)
+        return res
         
     fixes.sort(key=lambda f: f.get("event_date") or "")
     nf      = fixes[0]
@@ -407,16 +414,18 @@ def _next_fixture(bsd_team_id: int) -> dict:
     try:
         dt      = datetime.fromisoformat(
             (nf.get("event_date") or "").replace("Z", "+00:00"))
-        date_str= dt.strftime("%-d %b")
+        date_str= dt.strftime("%d %b").lstrip("0")
     except Exception:
         date_str= (nf.get("event_date") or "")[:10]
         
-    return {
+    res = {
         "opponent": opp_name, "venue": "H" if is_home else "A",
         "date": date_str, "fdr": fdr,
         "fdr_label": _fdr_label(fdr), "fdr_colour": _fdr_colour(fdr),
         "multiplier": FDR_MULTIPLIER.get(fdr, 1.0),
     }
+    cache_write(cache_key, res)
+    return res
 
 # ── FPL scoring helpers ───────────────────────────────────────────────────────
 
@@ -451,10 +460,16 @@ def _fpl_score(p: dict) -> float:
     return round(score, 3)
 
 def _build_player(p: dict, teams: dict) -> dict:
+    first_name  = (p.get("first_name") or "").strip()
+    second_name = (p.get("second_name") or "").strip()
+    full_name   = f"{first_name} {second_name}".strip()
+    known_name  = (p.get("known_name") or "").strip()
+    web_name    = (p.get("web_name") or "").strip()
+    display_name = known_name if known_name else (full_name if full_name else web_name)
+
     return {
         "id":          p.get("id"),
-        "name":        p.get("known_name") or p.get("web_name") or
-                       f"{p.get('first_name','')} {p.get('second_name','')}".strip(),
+        "name":        display_name,
         "team_id":     p.get("team"),
         "team":        _team_name(teams, p.get("team")),
         "position":    POS_MAP.get(p.get("element_type"), "UNK"),
@@ -495,7 +510,7 @@ def _reason_fpl(player: dict, fdr: int, fdr_label: str, opp: str, venue: str) ->
 @router.get("/fpl/players")
 def player_list():
     """Minimal player list for client-side search — id, name, team, position, price."""
-    cache_key = "fpl_player_list_v1"
+    cache_key = "fpl_player_list_v3"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FPL_TTL:
         cached["cached"] = True
@@ -505,12 +520,21 @@ def player_list():
     teams = fpl["teams"]
     out = []
     for p in fpl["players"]:
-        display_name = (p.get("known_name") or p.get("web_name") or
-                        f"{p.get('first_name','')} {p.get('second_name','')}".strip())
+        first_name  = (p.get("first_name") or "").strip()
+        second_name = (p.get("second_name") or "").strip()
+        full_name   = f"{first_name} {second_name}".strip()
+        known_name  = (p.get("known_name") or "").strip()
+        web_name    = (p.get("web_name") or "").strip()
+        display_name = known_name if known_name else (full_name if full_name else web_name)
+        first_name  = p.get("first_name") or ""
+        second_name = p.get("second_name") or ""
+        web_name    = p.get("web_name") or ""
+        known_name  = p.get("known_name") or ""
+        full_search = f"{display_name} {first_name} {second_name} {web_name} {known_name}"
         out.append({
             "id":          p.get("id"),
             "name":        display_name,
-            "search_name": _normalize_str(display_name),
+            "search_name": _normalize_str(full_search),
             "team":        _team_name(teams, p.get("team")),
             "position":    POS_MAP.get(p.get("element_type"), "UNK"),
             "price":       round((p.get("now_cost") or 0) / 10, 1),
