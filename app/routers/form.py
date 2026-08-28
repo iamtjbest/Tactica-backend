@@ -3,11 +3,11 @@ GET /api/form?team={name}
 Fetches last 5 finished matches for a team.
 Returns: { team, matches[], attack, defence, best_formation }
 1-hour cache per team.
-
+ 
 Date window: March 1 2026 → today
 This covers the full end of the 2025-26 European season (Mar-May/Jun 2026)
 while excluding older data from December 2025 and earlier.
-
+ 
 BSD calls:
   1 x GET /api/v2/teams/?name={name}            → team_id
   1 x GET /api/v2/teams/{id}/fixtures/?...      → up to 20 finished fixtures
@@ -20,7 +20,7 @@ USE_DUMMY_DATA = os.getenv('USE_DUMMY_DATA', 'False') == 'True'
 from fastapi import APIRouter, Query, HTTPException
 from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
                         cache_age, LEAGUE_NAMES)
-
+ 
 def _get_team_primary_league(team_id: int) -> int | None:
     """Return the primary league_id for a team (e.g., Premier League).
     If the API fails or the team has fewer than 5 fixtures in that league, return None so the caller can fall back.
@@ -35,10 +35,10 @@ def _get_team_primary_league(team_id: int) -> int | None:
         return int(league_id) if league_id is not None else None
     except Exception:
         return None
-
+ 
 router   = APIRouter()
 FORM_TTL = 3600   # 1 hour
-
+ 
 # Window covers the full 2025-26 season so ratings (attack/defence) reflect
 # the whole season's form. limit=50 ensures BSD returns enough fixtures that
 # after sorting DESC we reliably hit the 5 most recent regardless of how many
@@ -48,43 +48,65 @@ FORM_TTL = 3600   # 1 hour
 # the most recent May fixtures were never fetched. Raising to 50 fixes this.
 SEASON_START = "2025-08-01T00:00:00Z"  # widened to full 2025/26 season
 FORM_LIMIT   = 80
-
+ 
 # League IDs that are preseason friendlies or cups — never used for ratings.
 # BSD uses league_id=79 for preseason/friendly fixtures across multiple teams.
 # Add any other IDs found in practice.
 FRIENDLY_LEAGUE_IDS = {79, 0}  # 0 = unknown/unset
-
-
+ 
+ 
 def _dynamic_ratings(matches: list) -> tuple[int, int]:
-    """Calculate attack and defence ratings using Dixon‑Coles style.
+    """Calculate attack and defence ratings using Dixon-Coles style.
+ 
     • Uses up to the 10 most recent matches.
     • Binary decay weighting: weight 1.0 for the 5 newest, 0.5 for the next 5.
-    • Expected league‑average goals per game = 1.4.
-    • Clamps final ratings to the 10‑90 range.
+    • Expected league-average goals per game = 1.4.
+    • Sigmoid scaling prevents extreme single-match results from clamping
+      the output to 90 — a team scoring 3 goals once shouldn't become
+      ATT=90 when they also scored 0 twice.
+    • Final ratings clamped to 30-85 range (not 10-90) so dynamic ratings
+      stay in a realistic band — KNOWN_RATINGS handles the true elite/weak
+      extremes. This prevents early-season noise from producing 90/90.
     """
+    import math
     if not matches:
-        return 80, 80
+        return 72, 72  # mid-table default
+ 
     weighted_scored = 0.0
     weighted_conceded = 0.0
     total_weight = 0.0
     expected_goals = 1.4
+ 
     for idx, m in enumerate(matches[:10]):
         weight = 1.0 if idx < 5 else 0.5
-        weighted_scored += m["scored"] * weight
+        weighted_scored   += m["scored"]   * weight
         weighted_conceded += m["conceded"] * weight
-        total_weight += weight
-    # Prevent division by zero – enforce a small minimum on conceded goals
-    weighted_conceded = max(weighted_conceded, 0.2)
-    avg_scored = weighted_scored / total_weight
-    avg_conceded = weighted_conceded / total_weight
-    attack = int(10 + (avg_scored / expected_goals) * 80)
-    defence = int(10 + (expected_goals / avg_conceded) * 80)
-    # Clamp to keep values within sane bounds
-    attack = max(10, min(90, attack))
-    defence = max(10, min(90, defence))
+        total_weight      += weight
+ 
+    weighted_conceded = max(weighted_conceded, 0.3 * total_weight)
+    avg_scored    = weighted_scored   / total_weight
+    avg_conceded  = weighted_conceded / total_weight
+ 
+    # Ratio vs league average — capped at 2.0 so extreme results don't dominate
+    att_ratio = min(avg_scored   / expected_goals, 2.0)
+    def_ratio = min(expected_goals / avg_conceded, 2.0)
+ 
+    # Sigmoid scaling: maps 0-2 ratio → 30-82 rating
+    # ratio=1.0 (average team) → ~56, ratio=2.0 (dominant) → ~82
+    def _scale(ratio: float) -> int:
+        # sigmoid centred at ratio=1.0, output range 30-82
+        sig = 1.0 / (1.0 + math.exp(-3.5 * (ratio - 1.0)))
+        return int(30 + sig * 52)
+ 
+    attack  = _scale(att_ratio)
+    defence = _scale(def_ratio)
+ 
+    # Clamp to realistic dynamic range — KNOWN_RATINGS handles extremes
+    attack  = max(30, min(82, attack))
+    defence = max(30, min(82, defence))
     return attack, defence
-
-
+ 
+ 
 def _most_used_formation(matches: list) -> str | None:
     counts: dict[str, int] = {}
     for m in matches:
@@ -92,8 +114,8 @@ def _most_used_formation(matches: list) -> str | None:
         if f and f != "Unknown":
             counts[f] = counts.get(f, 0) + 1
     return max(counts, key=counts.get) if counts else None
-
-
+ 
+ 
 def _fixture_date(fix: dict) -> str:
     """Try known BSD date field names. Empty string sorts last under reverse=True."""
     return (
@@ -103,16 +125,16 @@ def _fixture_date(fix: dict) -> str:
         or fix.get("starting_at")
         or ""
     )
-
-
+ 
+ 
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
-    cache_key = f"form_v4__{team.lower().replace(' ', '_')}"
+    cache_key = f"form_v5__{team.lower().replace(' ', '_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FORM_TTL:
         cached["cached"] = True
         return cached
-
+ 
     # Resolve team_id
     team_id, bsd_name = bsd_find_team(team)
     if not team_id and USE_DUMMY_DATA:
@@ -124,7 +146,7 @@ def form(team: str = Query(..., description="Team name")):
         team_id, bsd_name = _fallback.get(team, (None, None))
     if not team_id:
         raise HTTPException(status_code=404, detail=f"Team '{team}' not found in BSD.")
-
+ 
     # Window: Aug 2025 → now. Fetch 50 (limit raised from 20 — a 10-month window
     # contains ~40-50 fixtures; limit=20 only returned the oldest 20 ascending
     # from BSD, meaning May matches were never fetched). Sort DESC in Python,
@@ -155,13 +177,13 @@ def form(team: str = Query(..., description="Team name")):
         })
     if not data:
         raise HTTPException(status_code=502, detail="BSD API error fetching fixtures.")
-
+ 
     fixtures = data.get("results", [])
-
+ 
     # Always strip friendly/preseason fixtures first — these distort ratings
     # (e.g. a 5-0 preseason win over a lower-league side inflates ATT to 90).
     fixtures = [f for f in fixtures if f.get("league_id") not in FRIENDLY_LEAGUE_IDS]
-
+ 
     # Then filter to primary league if we can determine it.
     # If fewer than 5 primary-league fixtures exist (early season), use all
     # remaining competitive fixtures rather than falling back to friendlies.
@@ -171,12 +193,12 @@ def form(team: str = Query(..., description="Team name")):
         # Use primary league if we have enough; otherwise use ALL competitive
         # fixtures (cups, Europe, etc.) — still better than friendlies.
         fixtures = league_fixtures if len(league_fixtures) >= 3 else fixtures
-
+ 
     # Sort descending by date in Python — BSD may return ASC
     # Sort descending by date in Python — BSD may return ASC
     fixtures.sort(key=_fixture_date, reverse=True)
     fixtures = fixtures[:10]   # true up to 10 most recent for decay weighting
-
+ 
     matches = []
     for fix in fixtures:
         fid        = fix.get("id", 0)
@@ -190,7 +212,7 @@ def form(team: str = Query(..., description="Team name")):
         league_id  = fix.get("league_id", 0)
         competition = LEAGUE_NAMES.get(league_id, f"League {league_id}")
         result     = "W" if scored > conceded else ("D" if scored == conceded else "L")
-
+ 
         formation = "Unknown"
         ld = bsd_get(f"/events/{fid}/lineups/")
         if ld:
@@ -199,7 +221,7 @@ def form(team: str = Query(..., description="Team name")):
             if status != "unavailable" and lineups:
                 side      = "home" if is_home else "away"
                 formation = (lineups.get(side) or {}).get("formation", "Unknown")
-
+ 
         matches.append({
             "fixture_id":   fid,
             "opponent":     opp,
@@ -210,7 +232,7 @@ def form(team: str = Query(..., description="Team name")):
             "formation":    formation,
             "event_date":   _fixture_date(fix),
         })
-
+ 
     # ── Rating calculation ────────────────────────────────────────────────────
     # _dynamic_ratings() divides by goals conceded — with fewer than 5 matches
     # a team that conceded 0-1 goals gets DEF=90 (clamped from 120-570).
@@ -254,9 +276,9 @@ def form(team: str = Query(..., description="Team name")):
             # Unknown club — use dynamic as-is but cap the swing
             att = max(10, min(90, raw_att))
             dfc = max(10, min(90, raw_dfc))
-
+ 
     best_form = _most_used_formation(matches)
-
+ 
     result_doc = {
         "_cached_at":     time.time(),
         "team":           team,
