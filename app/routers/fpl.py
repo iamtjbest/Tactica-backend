@@ -503,19 +503,20 @@ def player_list():
 
     fpl   = _get_fpl_data()
     teams = fpl["teams"]
-    out = [
-        {
-            "id":       p.get("id"),
-            "name":     p.get("known_name") or p.get("web_name") or
-                        f"{p.get('first_name','')} {p.get('second_name','')}".strip(),
-            "team":     _team_name(teams, p.get("team")),
-            "position": POS_MAP.get(p.get("element_type"), "UNK"),
-            "price":    round((p.get("now_cost") or 0) / 10, 1),
-            "status":   p.get("status", "a"),
-        }
-        for p in fpl["players"]
-        if int(p.get("minutes") or 0) > 0 or p.get("status") == "a"
-    ]
+    out = []
+    for p in fpl["players"]:
+        if int(p.get("minutes") or 0) > 0 or p.get("status") == "a":
+            display_name = (p.get("known_name") or p.get("web_name") or
+                            f"{p.get('first_name','')} {p.get('second_name','')}".strip())
+            out.append({
+                "id":          p.get("id"),
+                "name":        display_name,
+                "search_name": _normalize_str(display_name),
+                "team":        _team_name(teams, p.get("team")),
+                "position":    POS_MAP.get(p.get("element_type"), "UNK"),
+                "price":       round((p.get("now_cost") or 0) / 10, 1),
+                "status":      p.get("status", "a"),
+            })
     result = {"players": out, "cached": False, "_cached_at": time.time()}
     cache_write(cache_key, result)
     return result
