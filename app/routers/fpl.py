@@ -1080,7 +1080,7 @@ def squad_analysis(
         chip = "Bench Boost"
     else:
         chip = None
-+
+
 +    result = {
 +        "formation": formation,
 +        "starting_xi": starting,
