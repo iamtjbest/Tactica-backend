@@ -217,42 +217,117 @@ def _fdr_colour(fdr: int) -> str:
 FDR_MULTIPLIER = {1: 1.30, 2: 1.15, 3: 1.00, 4: 0.85, 5: 0.70}
 EASE_BONUS     = {1: 1.40, 2: 1.20, 3: 1.00}
 
-def _get_opponent_defence(opp_id: int) -> int:
+# ── Known baseline ratings ────────────────────────────────────────────────────
+# Used when BSD has < 5 finished matches for a team (e.g. early season,
+# UCL clubs whose league isn't scraped, newly promoted sides).
+# Tuned against UEFA coefficients and 2025/26 form — update each preseason.
+# Format: team_name → (attack, defence) on 10-90 scale.
+KNOWN_RATINGS: dict[str, tuple[int, int]] = {
+    # Pot 1 / elite
+    "Real Madrid":            (88, 88), "Barcelona":           (87, 85),
+    "Manchester City":        (87, 86), "Liverpool":           (85, 84),
+    "Bayern Munich":          (86, 87), "Paris Saint-Germain": (85, 83),
+    "Arsenal":                (82, 82), "Inter Milan":         (80, 85),
+    "Atletico Madrid":        (78, 86),
+    # Pot 2 / strong
+    "Borussia Dortmund":      (80, 78), "Aston Villa":         (78, 76),
+    "Manchester United":      (76, 78), "Porto":               (74, 75),
+    "Roma":                   (74, 73), "Sporting CP":         (72, 74),
+    "Club Brugge":            (68, 70), "Real Betis":          (70, 72),
+    "PSV Eindhoven":          (72, 70),
+    # Pot 3
+    "Napoli":                 (76, 74), "Feyenoord":           (70, 68),
+    "Lille":                  (68, 70), "RB Leipzig":          (74, 72),
+    "Villarreal":             (72, 70), "Galatasaray":         (68, 66),
+    "Fenerbahce":             (66, 65), "Shakhtar Donetsk":    (65, 68),
+    "Fenerbahçe SK":          (66, 65), "Galatasaray SK":      (68, 66),
+    # Pot 4 / UCL qualifiers
+    "Celtic":                 (65, 63), "Slavia Prague":       (60, 62),
+    "Sparta Prague":          (60, 62), "Stuttgart":           (70, 68),
+    "Como":                   (55, 55), "RC Lens":             (65, 66),
+    "AEK Athens":             (55, 58), "LASK":                (52, 55),
+    "Slovan Bratislava":      (50, 52), "Viking":              (50, 50),
+    "Bodo/Glimt":             (55, 55), "Sabah":               (52, 52),
+    # PL clubs — real data takes over after GW5+
+    "Chelsea":                (78, 78), "Tottenham Hotspur":   (76, 74),
+    "Newcastle United":       (76, 78), "Brighton & Hove Albion": (72, 74),
+    "Fulham":                 (68, 70), "Brentford":           (68, 68),
+    "Crystal Palace":         (65, 66), "Everton":             (62, 65),
+    "Bournemouth":            (65, 64), "Coventry City":       (58, 60),
+    "Hull City":              (56, 58), "Ipswich Town":        (58, 58),
+    "Leeds United":           (60, 60), "Sunderland":          (58, 58),
+    "Nottingham Forest":      (62, 64),
+}
+
+# Minimum matches required before _dynamic_ratings is trusted over KNOWN_RATINGS.
+# Below this threshold, too few data points → formula clamps everything to 90.
+MIN_MATCHES_FOR_DYNAMIC = 5
+
+
+def _baseline_defence(team_name: str) -> int:
+    """Return the known-ratings defence for a team, or league-average fallback."""
+    entry = KNOWN_RATINGS.get(team_name) or KNOWN_RATINGS.get(
+        _canonical_club(team_name)
+    )
+    if entry:
+        return entry[1]
+    return 65  # generic mid-table fallback → FDR 3
+
+
+def _get_opponent_defence(opp_id: int, opp_name: str = "") -> int:
+    """Fetch real defence rating from BSD match history.
+
+    Strategy:
+      1. Fetch finished fixtures from BSD (any league — not just PL).
+         This covers UCL sides (Bayern, PSG etc.) whose PL filter returns 0.
+      2. If ≥ MIN_MATCHES_FOR_DYNAMIC matches found → use _dynamic_ratings().
+         With fewer matches the formula clamps everything to 90 (1-match
+         conceded-0 teams all come out DEF=90 — not meaningful).
+      3. If < MIN_MATCHES_FOR_DYNAMIC → use KNOWN_RATINGS baseline instead.
+    """
     try:
         now    = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
+        # No league_id filter — fetch across all competitions so UCL/European
+        # clubs return data even when they have no PL matches.
         params = {
             "status": "finished", "limit": 40,
             "date_from": "2025-08-01T00:00:00Z", "date_to": now,
         }
-        pl_id = _get_pl_league_id()
-        if pl_id is not None:
-            params["league_id"] = pl_id
         data = bsd_get(f"/teams/{opp_id}/fixtures/", params=params)
         if not data:
-            return 45  # Standard fallback mapping to FDR 3
-            
+            return _baseline_defence(opp_name)
+
         raw = data if isinstance(data, list) else data.get("results", [])
         matches = []
         for fix in raw:
-            if not _is_pl(fix):
-                continue
-                
             is_home  = fix.get("home_team_id") == opp_id
             scored   = fix.get("home_score" if is_home else "away_score")
             conceded = fix.get("away_score" if is_home else "home_score")
-            
             if scored is not None and conceded is not None:
-                matches.append({"scored": scored, "conceded": conceded,
-                                "result": "W" if scored > conceded else
-                                ("D" if scored == conceded else "L"), "formation": ""})
-        if matches:
+                matches.append({
+                    "scored": scored, "conceded": conceded,
+                    "result": "W" if scored > conceded else
+                              ("D" if scored == conceded else "L"),
+                    "formation": "",
+                })
+
+        if len(matches) >= MIN_MATCHES_FOR_DYNAMIC:
             _, defence = _dynamic_ratings(matches)
-            
-            # Use Dixon‑Coles based rating directly; already clamped to 10‑90 in _dynamic_ratings
             return int(defence)
+
+        # Not enough data — blend known baseline with whatever little we have.
+        # This prevents a team that conceded 0 in GW1 from getting DEF=90.
+        baseline = _baseline_defence(opp_name)
+        if matches:
+            _, dynamic = _dynamic_ratings(matches)
+            # Weight: 80% baseline, 20% early-season dynamic
+            blended = int(0.80 * baseline + 0.20 * dynamic)
+            return max(10, min(90, blended))
+        return baseline
+
     except Exception:
         pass
-    return 45
+    return _baseline_defence(opp_name)
 
 def _next_fixture(bsd_team_id: int) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -286,7 +361,7 @@ def _next_fixture(bsd_team_id: int) -> dict:
     is_home = nf.get("home_team_id") == bsd_team_id
     opp_id  = nf.get("away_team_id" if is_home else "home_team_id") or 0
     opp_name= nf.get("away_team" if is_home else "home_team", "Unknown")
-    opp_def = _get_opponent_defence(opp_id)
+    opp_def = _get_opponent_defence(opp_id, opp_name)
     fdr     = _fdr(opp_def, is_away=not is_home)
     try:
         dt      = datetime.fromisoformat(
@@ -476,7 +551,7 @@ def fixture_ticker(
         except Exception:
             date_display = (fix.get("event_date",""))[:10]
             
-        opp_def = _get_opponent_defence(opp_id)
+        opp_def = _get_opponent_defence(opp_id, opp_name)
         fdr     = _fdr(opp_def, is_away=not is_home)
         
         fixtures_out.append({
