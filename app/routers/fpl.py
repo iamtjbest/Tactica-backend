@@ -1081,18 +1081,18 @@ def squad_analysis(
     else:
         chip = None
 
-+    result = {
-+        "formation": formation,
-+        "starting_xi": starting,
-+        "bench": bench,
-+        "captain": captain,
-+        "vice_captain": vice,
-+        "squad_value": squad_value,
-+        "bank": bank,
-+        "transfer_suggestions": transfer_suggestions,
-+        "share_text": cap_text,
-+        "chip_suggestion": chip,
-+        "cached": False, "_cached_at": time.time(),
-+    }
+    result = {
+        "formation": formation,
+        "starting_xi": starting,
+        "bench": bench,
+        "captain": captain,
+        "vice_captain": vice,
+        "squad_value": squad_value,
+        "bank": bank,
+        "transfer_suggestions": transfer_suggestions,
+        "share_text": cap_text,
+        "chip_suggestion": chip,
+        "cached": False, "_cached_at": time.time(),
+    }
     cache_write(cache_key, result)
     return result
