@@ -42,12 +42,22 @@ def _team_counts(squad: list[dict]) -> dict:
 
 def _current_gameweek() -> int:
     """Fetch current gameweek from the FPL bootstrap data (cached)."""
-    bootstrap = cache_read("fpl_bootstrap")
+    bootstrap = cache_read("fpl_raw_bootstrap")
     if not bootstrap or cache_age(bootstrap) > FPL_TTL:
-        bootstrap = bsd_get("https://fantasy.premierleague.com/api/bootstrap-static/")
-        cache_write("fpl_bootstrap", bootstrap)
-    # Assume events list is ordered; last element has latest gameweek
-    return bootstrap.get("events", [{}])[-1].get("id", 0)
+        try:
+            resp = requests.get(FPL_URL, timeout=10, headers={"User-Agent": "Tactica/1.0"})
+            resp.raise_for_status()
+            bootstrap = resp.json()
+            cache_write("fpl_raw_bootstrap", bootstrap)
+        except Exception:
+            return 0
+    if not bootstrap or not isinstance(bootstrap, dict):
+        return 0
+    events = bootstrap.get("events", [])
+    for ev in events:
+        if ev.get("is_current"):
+            return ev.get("id", 0)
+    return 0
 
 def _suggest_chip(gameweek: int) -> str | None:
     """Return a chip suggestion based on the current gameweek.
