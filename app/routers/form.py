@@ -199,7 +199,50 @@ def form(team: str = Query(..., description="Team name")):
             "event_date":   _fixture_date(fix),
         })
 
-    att, dfc  = _dynamic_ratings(matches)
+    # ── Rating calculation ────────────────────────────────────────────────────
+    # _dynamic_ratings() divides by goals conceded — with fewer than 5 matches
+    # a team that conceded 0-1 goals gets DEF=90 (clamped from 120-570).
+    # This produces nonsense equal ratings early in the season.
+    # Fix: require 5+ matches before trusting the dynamic formula.
+    # Below that, blend 80% known baseline + 20% early dynamic.
+    # Baselines sourced from UEFA coefficients + 2025/26 form.
+    _KNOWN = {
+        "Real Madrid":(88,88),"Barcelona":(87,85),"Manchester City":(87,86),
+        "Liverpool":(85,84),"Bayern Munich":(86,87),"Paris Saint-Germain":(85,83),
+        "Arsenal":(82,82),"Inter Milan":(80,85),"Atletico Madrid":(78,86),
+        "Borussia Dortmund":(80,78),"Aston Villa":(78,76),"Manchester United":(76,78),
+        "Porto":(74,75),"Roma":(74,73),"Sporting CP":(72,74),
+        "Club Brugge":(68,70),"Real Betis":(70,72),"PSV Eindhoven":(72,70),
+        "Napoli":(76,74),"Feyenoord":(70,68),"Lille":(68,70),
+        "RB Leipzig":(74,72),"Villarreal":(72,70),"Galatasaray":(68,66),
+        "Fenerbahce":(66,65),"Shakhtar Donetsk":(65,68),
+        "Celtic":(65,63),"Slavia Prague":(60,62),"Sparta Prague":(60,62),
+        "Stuttgart":(70,68),"Como":(55,55),"RC Lens":(65,66),
+        "Chelsea":(78,78),"Tottenham Hotspur":(76,74),"Newcastle United":(76,78),
+        "Brighton & Hove Albion":(72,74),"Fulham":(68,70),"Brentford":(68,68),
+        "Crystal Palace":(65,66),"Everton":(62,65),"Bournemouth":(65,64),
+        "Coventry City":(58,60),"Hull City":(56,58),"Ipswich Town":(58,58),
+        "Leeds United":(60,60),"Sunderland":(58,58),"Nottingham Forest":(62,64),
+    }
+    _MIN_MATCHES = 5
+    raw_att, raw_dfc = _dynamic_ratings(matches)
+    if len(matches) >= _MIN_MATCHES:
+        att, dfc = raw_att, raw_dfc
+    else:
+        baseline = _KNOWN.get(team) or _KNOWN.get(bsd_name)
+        if baseline:
+            b_att, b_dfc = baseline
+            if matches:
+                # Blend: 80% known, 20% early dynamic
+                att = max(10, min(90, int(0.80 * b_att + 0.20 * raw_att)))
+                dfc = max(10, min(90, int(0.80 * b_dfc + 0.20 * raw_dfc)))
+            else:
+                att, dfc = b_att, b_dfc
+        else:
+            # Unknown club — use dynamic as-is but cap the swing
+            att = max(10, min(90, raw_att))
+            dfc = max(10, min(90, raw_dfc))
+
     best_form = _most_used_formation(matches)
 
     result_doc = {
