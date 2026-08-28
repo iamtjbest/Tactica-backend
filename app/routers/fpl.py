@@ -28,6 +28,47 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Query, HTTPException
 from app.config import bsd_get, bsd_find_team, cache_read, cache_write, cache_age
 from app.routers.form import _dynamic_ratings
+import unicodedata  # needed for diacritic‑insensitive normalisation
+
+
+def _team_counts(squad: list[dict]) -> dict[int, int]:
+    """Return a mapping of real‑life team_id to player count in the squad."""
+    counts: dict[int, int] = {}
+    for p in squad:
+        team_id = p.get("team")
+        if isinstance(team_id, int):
+            counts[team_id] = counts.get(team_id, 0) + 1
+    return counts
+
+def _current_gameweek() -> int:
+    """Fetch current gameweek from the FPL bootstrap data (cached)."""
+    bootstrap = cache_read("fpl_bootstrap")
+    if not bootstrap or cache_age(bootstrap) > FPL_TTL:
+        bootstrap = bsd_get("https://fantasy.premierleague.com/api/bootstrap-static/")
+        cache_write("fpl_bootstrap", bootstrap)
+    # Assume events list is ordered; last element has latest gameweek
+    return bootstrap.get("events", [{}])[-1].get("id", 0)
+
+def _suggest_chip(gameweek: int) -> str | None:
+    """Return a chip suggestion based on the current gameweek.
+    Simple heuristic – can be refined later.
+    """
+    if 1 <= gameweek <= 3:
+        return "Free Hit"
+    if 4 <= gameweek <= 7:
+        return "Bench Boost"
+    if 8 <= gameweek <= 12:
+        return "Triple Captain"
+    return None
+
+def _normalize_str(s: str) -> str:
+    """Return a lower‑cased, diacritic‑free version of *s* for tolerant name matching."""
+    return (
+        unicodedata.normalize("NFKD", s)
+        .encode("ASCII", "ignore")
+        .decode("ASCII")
+        .lower()
+    )
 
 router   = APIRouter()
 FPL_URL  = "https://fantasy.premierleague.com/api/bootstrap-static/"
@@ -597,17 +638,33 @@ def captain_pick(
     teams = fpl["teams"]
 
     fpl_team_id = None
+    # Normalized matching using diacritic‑insensitive helper and short aliases
+    normalized_target = _normalize_str(team)
+    # First pass: exact or startswith match on canonical names
     for tid, tname in teams.items():
         canonical = _bsd_name(tname)
-        if canonical.lower() == team.lower() or canonical.lower().startswith(team.lower()[:4]):
+        norm_canonical = _normalize_str(canonical)
+        if norm_canonical == normalized_target or norm_canonical.startswith(normalized_target[:4]):
             fpl_team_id = tid
             break
+    # Second pass: fallback to substring match
     if not fpl_team_id:
         for tid, tname in teams.items():
             canonical = _bsd_name(tname)
-            if team.lower() in canonical.lower() or canonical.lower() in team.lower():
+            norm_canonical = _normalize_str(canonical)
+            if normalized_target in norm_canonical or norm_canonical in normalized_target:
                 fpl_team_id = tid
                 break
+        # Check short alias map if still not found
+        if not fpl_team_id:
+            for alias, full in _CLUB_SHORT_ALIASES.items():
+                if normalized_target == _normalize_str(alias) or normalized_target in _normalize_str(full):
+                    for tid, tname in teams.items():
+                        if _normalize_str(_bsd_name(tname)) == _normalize_str(full):
+                            fpl_team_id = tid
+                            break
+                    if fpl_team_id:
+                        break
     if not fpl_team_id:
         raise HTTPException(404, f"'{team}' not found in FPL data.")
 
@@ -952,6 +1009,8 @@ def squad_analysis(
     squad_ids  = set(ids)
     transfer_suggestions = []
 
+    # Prepare team count mapping for 3‑player rule
+    team_counts = _team_counts(squad)
     for out_p in squad:
         pos_id      = pos_id_map[out_p["position"]]
         max_budget  = round(out_p["price"] + bank, 1)
@@ -975,6 +1034,11 @@ def squad_analysis(
         best_candidate = scored_candidates[0]
 
         is_upgrade = best_candidate["weighted_score"] >= out_p["weighted_score"] * UPGRADE_THRESHOLD
+        # Enforce max 3 players per real‑life team
+        candidate_team = best_candidate.get("team")
+        if candidate_team is not None and team_counts.get(candidate_team, 0) >= 3:
+            # Skip candidate that would exceed team limit
+            continue
         if not (is_flagged or is_upgrade):
             continue
 
@@ -994,6 +1058,7 @@ def squad_analysis(
             "in": best_candidate,
             "reason": reason,
             "flagged": is_flagged,
+            "suggested_chip": _suggest_chip(_current_gameweek()),
         })
 
     transfer_suggestions.sort(key=lambda t: (not t["flagged"],
@@ -1007,17 +1072,27 @@ def squad_analysis(
         cap_text += f"Suggested transfer: {t['out']['name']} ➡ {t['in']['name']}\n"
     cap_text += "via @TacticaEngine · app.tactica.com.ng/fpl #FPL #MySquad"
 
-    result = {
-        "formation": formation,
-        "starting_xi": starting,
-        "bench": bench,
-        "captain": captain,
-        "vice_captain": vice,
-        "squad_value": squad_value,
-        "bank": bank,
-        "transfer_suggestions": transfer_suggestions,
-        "share_text": cap_text,
-        "cached": False, "_cached_at": time.time(),
-    }
+    # Chip suggestion based on current gameweek
+    current_gw = fpl.get("current_event") or 0
+    if current_gw <= 2:
+        chip = "Wildcard"
+    elif current_gw >= 20:
+        chip = "Bench Boost"
+    else:
+        chip = None
++
++    result = {
++        "formation": formation,
++        "starting_xi": starting,
++        "bench": bench,
++        "captain": captain,
++        "vice_captain": vice,
++        "squad_value": squad_value,
++        "bank": bank,
++        "transfer_suggestions": transfer_suggestions,
++        "share_text": cap_text,
++        "chip_suggestion": chip,
++        "cached": False, "_cached_at": time.time(),
++    }
     cache_write(cache_key, result)
     return result
