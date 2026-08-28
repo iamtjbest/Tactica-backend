@@ -49,6 +49,11 @@ FORM_TTL = 3600   # 1 hour
 SEASON_START = "2025-08-01T00:00:00Z"  # widened to full 2025/26 season
 FORM_LIMIT   = 80
 
+# League IDs that are preseason friendlies or cups — never used for ratings.
+# BSD uses league_id=79 for preseason/friendly fixtures across multiple teams.
+# Add any other IDs found in practice.
+FRIENDLY_LEAGUE_IDS = {79, 0}  # 0 = unknown/unset
+
 
 def _dynamic_ratings(matches: list) -> tuple[int, int]:
     """Calculate attack and defence ratings using Dixon‑Coles style.
@@ -102,7 +107,7 @@ def _fixture_date(fix: dict) -> str:
 
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
-    cache_key = f"form_v3__{team.lower().replace(' ', '_')}"
+    cache_key = f"form_v4__{team.lower().replace(' ', '_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FORM_TTL:
         cached["cached"] = True
@@ -153,12 +158,19 @@ def form(team: str = Query(..., description="Team name")):
 
     fixtures = data.get("results", [])
 
-    # Filter to primary league if we can determine it
+    # Always strip friendly/preseason fixtures first — these distort ratings
+    # (e.g. a 5-0 preseason win over a lower-league side inflates ATT to 90).
+    fixtures = [f for f in fixtures if f.get("league_id") not in FRIENDLY_LEAGUE_IDS]
+
+    # Then filter to primary league if we can determine it.
+    # If fewer than 5 primary-league fixtures exist (early season), use all
+    # remaining competitive fixtures rather than falling back to friendlies.
     primary_league = _get_team_primary_league(team_id)
     if primary_league is not None:
         league_fixtures = [f for f in fixtures if f.get("league_id") == primary_league]
-        # If we have at least 5 league fixtures, use them; otherwise fall back to all
-        fixtures = league_fixtures if len(league_fixtures) >= 5 else fixtures
+        # Use primary league if we have enough; otherwise use ALL competitive
+        # fixtures (cups, Europe, etc.) — still better than friendlies.
+        fixtures = league_fixtures if len(league_fixtures) >= 3 else fixtures
 
     # Sort descending by date in Python — BSD may return ASC
     # Sort descending by date in Python — BSD may return ASC
