@@ -46,7 +46,7 @@ FORM_TTL = 3600   # 1 hour
 # NOTE: BSD returns fixtures ASCENDING by default — we sort DESC in Python.
 # With limit=20 and a wide window, BSD returned the oldest 20 (Aug-Nov) and
 # the most recent May fixtures were never fetched. Raising to 50 fixes this.
-SEASON_START = "2025-08-01T00:00:00Z"  # widened to full 2025/26 season
+SEASON_START = "2026-01-01T00:00:00Z"  # widened to full 2025/26 season
 FORM_LIMIT   = 80
 
 # League IDs that are preseason friendlies or cups — never used for ratings.
