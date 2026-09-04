@@ -128,7 +128,7 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         return False
 
     def _search_and_match(query: str) -> tuple[int | None, str | None]:
-        data = bsd_get("/teams/", params={"name": query, "limit": 50})
+        data = bsd_get("/teams/", params={"name": query, "limit": 1000})
         if not data:
             return None, None
         results = data.get("results", [])
