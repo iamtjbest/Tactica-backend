@@ -22,7 +22,7 @@ def _save_players(db):
 
 @router.get("/squad")
 def squad(team: str = Query(..., description="Team name (any European club or national team)")):
-    cache_key = f"squad_v8__{team.lower().replace(' ','_')}"
+    cache_key = f"squad_v9__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
 
     if cached and cache_age(cached) < SQUAD_TTL and len(cached.get("players", [])) >= 15:
@@ -183,10 +183,17 @@ def squad(team: str = Query(..., description="Team name (any European club or na
         ],
     }
 
-    if len(players) < 15:
-        fb = None
+    fb = None
+    for k, v in KNOWN_SQUADS.items():
+        if k.lower() in team.lower() or team.lower() in k.lower():
+            fb = v
+            break
+
+    if fb:
+        players = fb
+    elif len(players) < 15:
         for k, v in KNOWN_SQUADS.items():
-            if k.lower() in team.lower() or team.lower() in k.lower() or k.lower() in bsd_name.lower() or bsd_name.lower() in k.lower():
+            if k.lower() in bsd_name.lower() or bsd_name.lower() in k.lower():
                 fb = v
                 break
         if fb:
