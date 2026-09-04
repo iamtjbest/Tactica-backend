@@ -127,6 +127,19 @@ def _fixture_date(fix: dict) -> str:
     )
 
 
+_KNOWN_RATINGS: dict[str, tuple[int, int]] = {
+    "Real Madrid":(88,88),"Barcelona":(87,85),"FC Barcelona":(87,85),"Manchester City":(87,86),
+    "Liverpool":(85,84),"Bayern Munich":(86,87),"FC Bayern München":(86,87),
+    "Paris Saint-Germain":(85,83),"Arsenal":(82,82),"Inter Milan":(80,85),"Inter":(80,85),
+    "Atletico Madrid":(78,86),"Atlético Madrid":(78,86),"Borussia Dortmund":(80,78),
+    "Aston Villa":(78,76),"Manchester United":(76,78),"Chelsea":(78,78),
+    "Tottenham Hotspur":(76,74),"Tottenham":(76,74),"Newcastle United":(76,78),
+    "Everton":(62,65),"Brighton":(72,74),"Brighton & Hove Albion":(72,74),
+    "Fulham":(68,70),"Brentford":(68,68),"Crystal Palace":(65,66),
+    "Bournemouth":(65,64),"Nottingham Forest":(62,64),"West Ham United":(66,66),
+    "Wolves":(62,64),"Wolverhampton Wanderers":(62,64),
+}
+
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
     cache_key = f"form_v5__{team.lower().replace(' ', '_')}"
@@ -147,13 +160,8 @@ def form(team: str = Query(..., description="Team name")):
     if not team_id:
         raise HTTPException(status_code=404, detail=f"Team '{team}' not found in BSD.")
 
-    # Window: Aug 2025 → now. Fetch 50 (limit raised from 20 — a 10-month window
-    # contains ~40-50 fixtures; limit=20 only returned the oldest 20 ascending
-    # from BSD, meaning May matches were never fetched). Sort DESC in Python,
-    # slice to 5 most recent. Never trust BSD default order (confirmed ascending).
     date_to = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
     if USE_DUMMY_DATA and team_id in (1, 2):
-        # Dummy fixtures for test environment
         dummy_fixtures = []
         for i in range(5):
             dummy_fixtures.append({
@@ -180,24 +188,17 @@ def form(team: str = Query(..., description="Team name")):
 
     fixtures = data.get("results", [])
 
-    # Always strip friendly/preseason fixtures first — these distort ratings
-    # (e.g. a 5-0 preseason win over a lower-league side inflates ATT to 90).
+    # Always strip friendly/preseason fixtures first
     fixtures = [f for f in fixtures if f.get("league_id") not in FRIENDLY_LEAGUE_IDS]
 
-    # Then filter to primary league if we can determine it.
-    # If fewer than 5 primary-league fixtures exist (early season), use all
-    # remaining competitive fixtures rather than falling back to friendlies.
+    # Filter to primary league if available
     primary_league = _get_team_primary_league(team_id)
     if primary_league is not None:
         league_fixtures = [f for f in fixtures if f.get("league_id") == primary_league]
-        # Use primary league if we have enough; otherwise use ALL competitive
-        # fixtures (cups, Europe, etc.) — still better than friendlies.
         fixtures = league_fixtures if len(league_fixtures) >= 3 else fixtures
 
-    # Sort descending by date in Python — BSD may return ASC
-    # Sort descending by date in Python — BSD may return ASC
     fixtures.sort(key=_fixture_date, reverse=True)
-    fixtures = fixtures[:10]   # true up to 10 most recent for decay weighting
+    fixtures = fixtures[:10]   # up to 10 most recent for decay weighting
 
     matches = []
     for fix in fixtures:
@@ -208,10 +209,16 @@ def form(team: str = Query(..., description="Team name")):
         is_home    = (home_id == team_id)
         scored     = home_score if is_home else away_score
         conceded   = away_score if is_home else home_score
-        opp        = fix.get("away_team", "?") if is_home else fix.get("home_team", "?")
-        league_id  = fix.get("league_id", 0)
+
+        opp_val    = fix.get("away_team") if is_home else fix.get("home_team")
+        if isinstance(opp_val, dict):
+            opp = opp_val.get("name", "?")
+        else:
+            opp = str(opp_val or "?")
+
+        league_id   = fix.get("league_id", 0)
         competition = LEAGUE_NAMES.get(league_id, f"League {league_id}")
-        result     = "W" if scored > conceded else ("D" if scored == conceded else "L")
+        result      = "W" if scored > conceded else ("D" if scored == conceded else "L")
 
         formation = "Unknown"
         ld = bsd_get(f"/events/{fid}/lineups/")
@@ -234,29 +241,20 @@ def form(team: str = Query(..., description="Team name")):
         })
 
     # ── Rating calculation ────────────────────────────────────────────────────
-    # _dynamic_ratings() divides by goals conceded — with fewer than 5 matches
-    # a team that conceded 0-1 goals gets DEF=90 (clamped from 120-570).
-    # This produces nonsense equal ratings early in the season.
-    # Fix: require 5+ matches before trusting the dynamic formula.
-    # Below that, blend 80% known baseline + 20% early dynamic.
-    # Baselines sourced from UEFA coefficients + 2025/26 form.
-  
     _MIN_MATCHES = 5
     raw_att, raw_dfc = _dynamic_ratings(matches)
     if len(matches) >= _MIN_MATCHES:
         att, dfc = raw_att, raw_dfc
     else:
-        baseline = _KNOWN.get(team) or _KNOWN.get(bsd_name)
+        baseline = _KNOWN_RATINGS.get(team) or _KNOWN_RATINGS.get(bsd_name)
         if baseline:
             b_att, b_dfc = baseline
             if matches:
-                # Blend: 80% known, 20% early dynamic
                 att = max(10, min(90, int(0.80 * b_att + 0.20 * raw_att)))
                 dfc = max(10, min(90, int(0.80 * b_dfc + 0.20 * raw_dfc)))
             else:
                 att, dfc = b_att, b_dfc
         else:
-            # Unknown club — use dynamic as-is but cap the swing
             att = max(10, min(90, raw_att))
             dfc = max(10, min(90, raw_dfc))
 
