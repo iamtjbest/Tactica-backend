@@ -25,7 +25,7 @@ def squad(team: str = Query(..., description="Team name (any European club or na
     cache_key = f"squad_v7__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
 
-    if cached and cache_age(cached) < SQUAD_TTL:
+    if cached and cache_age(cached) < SQUAD_TTL and len(cached.get("players", [])) >= 15:
         return {
             "team_name": team,
             "bsd_name":  cached.get("bsd_name", team),
