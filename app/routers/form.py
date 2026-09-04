@@ -142,7 +142,7 @@ _KNOWN_RATINGS: dict[str, tuple[int, int]] = {
 
 @router.get("/form")
 def form(team: str = Query(..., description="Team name")):
-    cache_key = f"form_v5__{team.lower().replace(' ', '_')}"
+    cache_key = f"form_v6__{team.lower().replace(' ', '_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FORM_TTL:
         cached["cached"] = True
