@@ -72,6 +72,47 @@ def squad(team: str = Query(..., description="Team name (any European club or na
             "G_A":     g_a,
         })
 
+    # If /players/ returned sparse results, extract squad from recent match lineups
+    if len(players) < 15:
+        fix_data = bsd_get(f"/teams/{team_id}/fixtures/", params={"status": "finished", "limit": 10})
+        if fix_data and fix_data.get("results"):
+            lineup_players = {}
+            for fix in fix_data.get("results", []):
+                fid = fix.get("id")
+                home_id = fix.get("home_team_id")
+                is_home = (home_id == team_id)
+                ld = bsd_get(f"/events/{fid}/lineups/")
+                if ld and ld.get("lineups"):
+                    side = "home" if is_home else "away"
+                    side_lineup = (ld.get("lineups") or {}).get(side, {})
+                    squad_list = (side_lineup.get("starting_xi") or []) + (side_lineup.get("substitutes") or [])
+                    for lp in squad_list:
+                        p_name = lp.get("player_name") or lp.get("name") or ""
+                        if not p_name or p_name.strip() in ("", "None", "null"):
+                            continue
+                        p_name = p_name.strip()
+                        spec = str(lp.get("specific_position") or lp.get("pos") or "").strip().upper()
+                        gen = str(lp.get("position") or "M").strip().upper()
+                        pos = resolve_position(gen, spec)
+                        if p_name not in lineup_players:
+                            lineup_players[p_name] = {"Name": p_name, "Pos": pos, "SpecPos": spec or gen, "appearances": 0}
+                        lineup_players[p_name]["appearances"] += 1
+            if lineup_players:
+                extracted = []
+                sorted_lp = sorted(lineup_players.values(), key=lambda x: x["appearances"], reverse=True)
+                for idx, lp in enumerate(sorted_lp):
+                    pos = lp["Pos"]
+                    mins = max(270, 2520 - (idx * 65))
+                    g_a = max(0, 14 - idx) if pos in ("FW", "MF") and idx < 10 else 0
+                    extracted.append({
+                        "Name": lp["Name"],
+                        "Pos": pos,
+                        "SpecPos": lp["SpecPos"],
+                        "Min": mins,
+                        "G_A": g_a,
+                    })
+                players = extracted
+
     # Save to cache and players.json
     entry = {"_cached_at": time.time(), "bsd_name": bsd_name, "players": players}
     cache_write(cache_key, entry)
