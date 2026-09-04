@@ -240,24 +240,7 @@ def form(team: str = Query(..., description="Team name")):
     # Fix: require 5+ matches before trusting the dynamic formula.
     # Below that, blend 80% known baseline + 20% early dynamic.
     # Baselines sourced from UEFA coefficients + 2025/26 form.
-    _KNOWN = {
-        "Real Madrid":(88,88),"Barcelona":(87,85),"Manchester City":(87,86),
-        "Liverpool":(85,84),"Bayern Munich":(86,87),"Paris Saint-Germain":(85,83),
-        "Arsenal":(82,82),"Inter Milan":(80,85),"Atletico Madrid":(78,86),
-        "Borussia Dortmund":(80,78),"Aston Villa":(78,76),"Manchester United":(76,78),
-        "Porto":(74,75),"Roma":(74,73),"Sporting CP":(72,74),
-        "Club Brugge":(68,70),"Real Betis":(70,72),"PSV Eindhoven":(72,70),
-        "Napoli":(76,74),"Feyenoord":(70,68),"Lille":(68,70),
-        "RB Leipzig":(74,72),"Villarreal":(72,70),"Galatasaray":(68,66),
-        "Fenerbahce":(66,65),"Shakhtar Donetsk":(65,68),
-        "Celtic":(65,63),"Slavia Prague":(60,62),"Sparta Prague":(60,62),
-        "Stuttgart":(70,68),"Como":(55,55),"RC Lens":(65,66),
-        "Chelsea":(78,78),"Tottenham Hotspur":(76,74),"Newcastle United":(76,78),
-        "Brighton & Hove Albion":(72,74),"Fulham":(68,70),"Brentford":(68,68),
-        "Crystal Palace":(65,66),"Everton":(62,65),"Bournemouth":(65,64),
-        "Coventry City":(58,60),"Hull City":(56,58),"Ipswich Town":(58,58),
-        "Leeds United":(60,60),"Sunderland":(58,58),"Nottingham Forest":(62,64),
-    }
+  
     _MIN_MATCHES = 5
     raw_att, raw_dfc = _dynamic_ratings(matches)
     if len(matches) >= _MIN_MATCHES:
