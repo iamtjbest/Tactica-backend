@@ -114,14 +114,19 @@ def bsd_get(path: str, params: dict = None) -> dict | None:
 def bsd_find_team(name: str) -> tuple[int | None, str | None]:
     """
     Search BSD for a team by name. Returns (team_id, matched_name) or (None, None).
-
-    Strategy (in order):
-      1. Search full name as-is (e.g. 'Manchester United')
-      2. If empty results, search first significant word (e.g. 'Bayern' from 'Bayern Munich')
-         — handles clubs whose BSD name differs (FC Bayern München vs Bayern Munich)
-      3. If still empty, search first two words
-      4. Additional fallbacks: try appending common suffixes like 'FC', 'United', and prefix 'FC '
+    Filters out reserve/youth/women teams unless specifically requested.
     """
+    RESERVE_KEYWORDS = (" B", " II", " 2", " U21", " U23", " U19", " U18", " LFC", " WOMEN", " FEMENINO", " YOUTH")
+
+    def _is_reserve(tname: str) -> bool:
+        t_upper = tname.upper()
+        # Only treat as reserve if query didn't ask for reserve/youth keywords
+        q_upper = name.upper()
+        for kw in RESERVE_KEYWORDS:
+            if kw in t_upper and kw not in q_upper:
+                return True
+        return False
+
     def _search_and_match(query: str) -> tuple[int | None, str | None]:
         data = bsd_get("/teams/", params={"name": query, "limit": 50})
         if not data:
@@ -129,15 +134,26 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         results = data.get("results", [])
         if not results:
             return None, None
-        names_lower = [t["name"].lower() for t in results]
-        # Try matching the ORIGINAL name (not the shortened query) against results
+
+        # Filter out reserve/youth/women teams unless no main team exists
+        main_teams = [t for t in results if not _is_reserve(t["name"])]
+        candidates = main_teams if main_teams else results
+
+        # 1. Look for EXACT match (case-insensitive)
+        for t in candidates:
+            if t["name"].lower() == name.lower():
+                return t["id"], t["name"]
+
+        # 2. Look for close match using difflib
+        names_lower = [t["name"].lower() for t in candidates]
         best = difflib.get_close_matches(name.lower(), names_lower, n=1, cutoff=0.30)
         if best:
-            for t in results:
+            for t in candidates:
                 if t["name"].lower() == best[0]:
                     return t["id"], t["name"]
-        # Fallback: return top result
-        return results[0]["id"], results[0]["name"]
+
+        # Fallback: return top candidate
+        return candidates[0]["id"], candidates[0]["name"]
 
     # Strategy 1: full name
     tid, bname = _search_and_match(name)
@@ -145,8 +161,7 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         return tid, bname
 
     # Strategy 2: first significant word only
-    # Strip common prefixes like 'FC', 'AS', 'AC', 'SC', 'SV', 'VfB', 'RB'
-    words = [w for w in name.split() if w.upper() not in ("FC", "AS", "AC", "SC", "SV", "VFB", "RB", "CF")]
+    words = [w for w in name.split() if w.upper() not in ("FC", "AS", "AC", "SC", "SV", "VFB", "RB", "CF", "RCD", "ESTAC", "AFC", "LOSC", "OGC", "SK", "US", "TSG", "VFB", "FSV")]
     if words:
         tid, bname = _search_and_match(words[0])
         if tid:
