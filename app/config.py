@@ -139,6 +139,9 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         main_teams = [t for t in results if not _is_reserve(t["name"])]
         candidates = main_teams if main_teams else results
 
+        # Prioritize entries in major leagues (LEAGUE_NAMES) to avoid picking Women/Youth team entries
+        candidates.sort(key=lambda t: 0 if t.get("league_id") in LEAGUE_NAMES else 1)
+
         # 1. Look for EXACT match (case-insensitive)
         for t in candidates:
             if t["name"].lower() == name.lower():
