@@ -46,7 +46,7 @@ FORM_TTL = 3600   # 1 hour
 # NOTE: BSD returns fixtures ASCENDING by default — we sort DESC in Python.
 # With limit=20 and a wide window, BSD returned the oldest 20 (Aug-Nov) and
 # the most recent May fixtures were never fetched. Raising to 50 fixes this.
-SEASON_START = "2026-01-01T00:00:00Z"  # widened to full 2025/26 season
+SEASON_START = "2025-08-01T00:00:00Z"  # widened to full 2025/26 season
 FORM_LIMIT   = 80
 
 # League IDs that are preseason friendlies or cups — never used for ratings.
@@ -129,7 +129,7 @@ def _fixture_date(fix: dict) -> str:
 
 _KNOWN_RATINGS: dict[str, tuple[int, int]] = {
     "Real Madrid":(88,88),"Barcelona":(87,85),"FC Barcelona":(87,85),"Manchester City":(87,86),
-    "Liverpool":(85,84),"Bayern Munich":(86,87),"FC Bayern München":(86,87),
+    "Liverpool":(85,84),"Liverpool FC":(85,84),"Bayern Munich":(86,87),"FC Bayern München":(86,87),
     "Paris Saint-Germain":(85,83),"Arsenal":(82,82),"Inter Milan":(80,85),"Inter":(80,85),
     "Atletico Madrid":(78,86),"Atlético Madrid":(78,86),"Borussia Dortmund":(80,78),
     "Aston Villa":(78,76),"Manchester United":(76,78),"Chelsea":(78,78),
