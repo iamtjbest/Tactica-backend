@@ -22,7 +22,7 @@ def _save_players(db):
 
 @router.get("/squad")
 def squad(team: str = Query(..., description="Team name (any European club or national team)")):
-    cache_key = f"squad_v7__{team.lower().replace(' ','_')}"
+    cache_key = f"squad_v8__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
 
     if cached and cache_age(cached) < SQUAD_TTL and len(cached.get("players", [])) >= 15:
@@ -136,6 +136,50 @@ def squad(team: str = Query(..., description="Team name (any European club or na
             {"Name": "Mason Mount", "Pos": "MF", "SpecPos": "CAM", "Min": 1100, "G_A": 5},
             {"Name": "Christian Eriksen", "Pos": "MF", "SpecPos": "CM", "Min": 1300, "G_A": 6},
             {"Name": "Luke Shaw", "Pos": "DF", "SpecPos": "LB", "Min": 900, "G_A": 2},
+        ],
+        "Liverpool": [
+            {"Name": "Alisson Becker", "Pos": "GK", "SpecPos": "GK", "Min": 2500, "G_A": 0},
+            {"Name": "Trent Alexander-Arnold", "Pos": "DF", "SpecPos": "RB", "Min": 2750, "G_A": 12},
+            {"Name": "Virgil van Dijk", "Pos": "DF", "SpecPos": "CB", "Min": 3000, "G_A": 5},
+            {"Name": "Ibrahima Konaté", "Pos": "DF", "SpecPos": "CB", "Min": 2400, "G_A": 2},
+            {"Name": "Andrew Robertson", "Pos": "DF", "SpecPos": "LB", "Min": 2500, "G_A": 6},
+            {"Name": "Alexis Mac Allister", "Pos": "MF", "SpecPos": "CM", "Min": 2800, "G_A": 11},
+            {"Name": "Ryan Gravenberch", "Pos": "MF", "SpecPos": "DM", "Min": 2700, "G_A": 4},
+            {"Name": "Dominik Szoboszlai", "Pos": "MF", "SpecPos": "CAM", "Min": 2600, "G_A": 12},
+            {"Name": "Mohamed Salah", "Pos": "FW", "SpecPos": "RW", "Min": 3100, "G_A": 32},
+            {"Name": "Luis Díaz", "Pos": "FW", "SpecPos": "LW", "Min": 2500, "G_A": 15},
+            {"Name": "Darwin Núñez", "Pos": "FW", "SpecPos": "ST", "Min": 2100, "G_A": 18},
+            {"Name": "Cody Gakpo", "Pos": "FW", "SpecPos": "LW", "Min": 2000, "G_A": 14},
+            {"Name": "Diogo Jota", "Pos": "FW", "SpecPos": "ST", "Min": 1700, "G_A": 13},
+            {"Name": "Curtis Jones", "Pos": "MF", "SpecPos": "CM", "Min": 1800, "G_A": 7},
+            {"Name": "Harvey Elliott", "Pos": "MF", "SpecPos": "CAM", "Min": 1500, "G_A": 8},
+            {"Name": "Wataru Endo", "Pos": "MF", "SpecPos": "DM", "Min": 1400, "G_A": 2},
+            {"Name": "Jarell Quansah", "Pos": "DF", "SpecPos": "CB", "Min": 1300, "G_A": 1},
+            {"Name": "Conor Bradley", "Pos": "DF", "SpecPos": "RB", "Min": 1200, "G_A": 4},
+            {"Name": "Caoimhin Kelleher", "Pos": "GK", "SpecPos": "GK", "Min": 900, "G_A": 0},
+            {"Name": "Federico Chiesa", "Pos": "FW", "SpecPos": "RW", "Min": 800, "G_A": 5},
+        ],
+        "Manchester City": [
+            {"Name": "Ederson", "Pos": "GK", "SpecPos": "GK", "Min": 2800, "G_A": 0},
+            {"Name": "Kyle Walker", "Pos": "DF", "SpecPos": "RB", "Min": 2300, "G_A": 2},
+            {"Name": "Rúben Dias", "Pos": "DF", "SpecPos": "CB", "Min": 2700, "G_A": 1},
+            {"Name": "Manuel Akanji", "Pos": "DF", "SpecPos": "CB", "Min": 2600, "G_A": 3},
+            {"Name": "Josko Gvardiol", "Pos": "DF", "SpecPos": "LB", "Min": 2800, "G_A": 8},
+            {"Name": "Rodri", "Pos": "MF", "SpecPos": "DM", "Min": 2900, "G_A": 14},
+            {"Name": "Mateo Kovačić", "Pos": "MF", "SpecPos": "CM", "Min": 2400, "G_A": 6},
+            {"Name": "Kevin De Bruyne", "Pos": "MF", "SpecPos": "CAM", "Min": 2200, "G_A": 24},
+            {"Name": "Bernardo Silva", "Pos": "MF", "SpecPos": "RW", "Min": 2700, "G_A": 16},
+            {"Name": "Phil Foden", "Pos": "FW", "SpecPos": "CAM", "Min": 2800, "G_A": 28},
+            {"Name": "Erling Haaland", "Pos": "FW", "SpecPos": "ST", "Min": 3000, "G_A": 35},
+            {"Name": "Savinho", "Pos": "FW", "SpecPos": "RW", "Min": 1900, "G_A": 10},
+            {"Name": "Jérémy Doku", "Pos": "FW", "SpecPos": "LW", "Min": 2000, "G_A": 12},
+            {"Name": "Ilkay Gündogan", "Pos": "MF", "SpecPos": "CM", "Min": 2300, "G_A": 9},
+            {"Name": "John Stones", "Pos": "DF", "SpecPos": "CB", "Min": 1800, "G_A": 4},
+            {"Name": "Nathan Aké", "Pos": "DF", "SpecPos": "LB", "Min": 1700, "G_A": 2},
+            {"Name": "Rico Lewis", "Pos": "DF", "SpecPos": "RB", "Min": 1900, "G_A": 5},
+            {"Name": "Stefan Ortega", "Pos": "GK", "SpecPos": "GK", "Min": 600, "G_A": 0},
+            {"Name": "Matheus Nunes", "Pos": "MF", "SpecPos": "CM", "Min": 1400, "G_A": 4},
+            {"Name": "Jack Grealish", "Pos": "FW", "SpecPos": "LW", "Min": 1600, "G_A": 7},
         ],
     }
 
