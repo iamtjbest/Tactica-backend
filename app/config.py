@@ -142,6 +142,14 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         # Prioritize entries in major leagues (LEAGUE_NAMES) to avoid picking Women/Youth team entries
         candidates.sort(key=lambda t: 0 if t.get("league_id") in LEAGUE_NAMES else 1)
 
+        # Filter out dead/broken team IDs that return 502 from BSD
+        active_candidates = []
+        for t in candidates:
+            fix_check = bsd_get(f"/teams/{t['id']}/fixtures/", params={"limit": 1})
+            if fix_check is not None:
+                active_candidates.append(t)
+        candidates = active_candidates if active_candidates else candidates
+
         # 1. Look for EXACT match (case-insensitive)
         for t in candidates:
             if t["name"].lower() == name.lower():
