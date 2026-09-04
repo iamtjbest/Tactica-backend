@@ -96,7 +96,7 @@ class PredictRequest(BaseModel):
 _KNOWN_RATINGS: dict[str, tuple[int, int]] = {
     # Pot 1 / elite
     "Real Madrid":(88,88),"Barcelona":(87,85),"Manchester City":(87,86),
-    "Liverpool":(85,84),"Bayern Munich":(86,87),"Paris Saint-Germain":(85,83),
+    "Liverpool":(85,84),"Liverpool FC":(85,84),"Bayern Munich":(86,87),"Paris Saint-Germain":(85,83),
     "Arsenal":(82,82),"Inter Milan":(80,85),"Atletico Madrid":(78,86),
     # Pot 2 / strong
     "Borussia Dortmund":(80,78),"Aston Villa":(78,76),"Manchester United":(76,78),
