@@ -16,9 +16,11 @@ Endpoints:
   GET  /api/health          → Health check
 """
 
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import predict, lineup, chat, live, squad, form, nations, fpl
+from app.config import clear_cache
 
 app = FastAPI(
     title="Tactica AI Engine",
@@ -54,3 +56,19 @@ app.include_router(fpl.router,        prefix="/api")
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "Tactica AI Engine v2"}
+
+@app.delete("/api/admin/cache")
+def clear_cache_endpoint(
+    key: str = Query(..., description="Must match the ADMIN_KEY env var"),
+    prefix: str = Query("", description="Only clear keys starting with this, e.g. 'form_v7__'. Empty = clear everything."),
+):
+    """Manually bust the file cache without waiting out the TTL or redeploying.
+    Set ADMIN_KEY in Render's env vars, then call:
+    DELETE /api/admin/cache?key=YOUR_ADMIN_KEY
+    DELETE /api/admin/cache?key=YOUR_ADMIN_KEY&prefix=form_v7__   (just /form entries)
+    """
+    admin_key = os.environ.get("ADMIN_KEY", "")
+    if not admin_key or key != admin_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing admin key.")
+    deleted = clear_cache(prefix)
+    return {"status": "ok", "deleted": deleted, "prefix": prefix or "(all)"}
