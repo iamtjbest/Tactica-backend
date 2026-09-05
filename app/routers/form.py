@@ -209,15 +209,18 @@ def form(
         raise HTTPException(status_code=502, detail="BSD API error fetching fixtures.")
 
     fixtures = data.get("results", [])
+    _raw_fixture_count = len(fixtures)
 
     # Always strip friendly/preseason fixtures first
     fixtures = [f for f in fixtures if f.get("league_id") not in FRIENDLY_LEAGUE_IDS]
+    _after_friendly_strip = len(fixtures)
 
     # Filter to primary league if available
     primary_league = _get_team_primary_league(team_id)
     if primary_league is not None:
         league_fixtures = [f for f in fixtures if f.get("league_id") == primary_league]
         fixtures = league_fixtures if len(league_fixtures) >= _MIN_MATCHES else fixtures
+    _after_league_filter = len(fixtures)
 
     fixtures.sort(key=_fixture_date, reverse=True)
     fixtures = fixtures[:10]   # up to 10 most recent for decay weighting
@@ -291,6 +294,14 @@ def form(
         "win_percentage": max(0, min(100, int(((att - 10) / 80) * 100))),
         "best_formation": best_form,
         "cached":         False,
+        "_debug": {
+            "team_id":               team_id,
+            "primary_league":        primary_league,
+            "raw_fixture_count":     _raw_fixture_count,
+            "after_friendly_strip":  _after_friendly_strip,
+            "after_league_filter":   _after_league_filter,
+            "used_dynamic_rating":   len(matches) >= _MIN_MATCHES,
+        },
     }
     cache_write(cache_key, result_doc)
     return result_doc
