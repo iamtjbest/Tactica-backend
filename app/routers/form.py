@@ -143,15 +143,11 @@ _KNOWN_RATINGS: dict[str, tuple[int, int]] = {
 @router.get("/form")
 def form(
     team: str = Query(..., description="Team name"),
-    refresh: bool = Query(False, description="Skip cache and recompute fresh (useful right after a deploy)"),
+    refresh: bool = Query(True, description="Deprecated no-op — BSD is now always fetched fresh; cache is only used as a fallback if BSD fails"),
 ):
     cache_key = f"form_v7__{team.lower().replace(' ', '_')}"
-    cached    = cache_read(cache_key)
-    if not refresh and cached and cache_age(cached) < FORM_TTL:
-        cached["cached"] = True
-        return cached
 
-    # Resolve team_id
+    # Resolve team_id — always hit BSD live, never trust cache for this
     team_id, bsd_name = bsd_find_team(team)
     if not team_id and USE_DUMMY_DATA:
         # Fallback for test environment – provide dummy IDs for known teams
@@ -161,6 +157,13 @@ def form(
         }
         team_id, bsd_name = _fallback.get(team, (None, None))
     if not team_id:
+        # BSD lookup itself failed (or team truly doesn't exist) — fall back
+        # to a cached copy if we have one rather than hard-failing.
+        cached = cache_read(cache_key)
+        if cached:
+            cached["cached"] = True
+            cached["_served_stale_reason"] = "bsd_team_lookup_failed"
+            return cached
         raise HTTPException(status_code=404, detail=f"Team '{team}' not found in BSD.")
 
     date_to = datetime.now(timezone.utc).strftime("%Y-%m-%dT23:59:59Z")
@@ -187,6 +190,13 @@ def form(
             "date_to":   date_to,
         })
     if not data:
+        # BSD fixtures fetch failed (timeout/error/rate-limit) — fall back
+        # to a cached copy if we have one rather than hard-failing.
+        cached = cache_read(cache_key)
+        if cached:
+            cached["cached"] = True
+            cached["_served_stale_reason"] = "bsd_fixtures_fetch_failed"
+            return cached
         raise HTTPException(status_code=502, detail="BSD API error fetching fixtures.")
 
     fixtures = data.get("results", [])
