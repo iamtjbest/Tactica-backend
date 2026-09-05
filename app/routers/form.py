@@ -141,10 +141,13 @@ _KNOWN_RATINGS: dict[str, tuple[int, int]] = {
 }
 
 @router.get("/form")
-def form(team: str = Query(..., description="Team name")):
+def form(
+    team: str = Query(..., description="Team name"),
+    refresh: bool = Query(False, description="Skip cache and recompute fresh (useful right after a deploy)"),
+):
     cache_key = f"form_v7__{team.lower().replace(' ', '_')}"
     cached    = cache_read(cache_key)
-    if cached and cache_age(cached) < FORM_TTL:
+    if not refresh and cached and cache_age(cached) < FORM_TTL:
         cached["cached"] = True
         return cached
 
