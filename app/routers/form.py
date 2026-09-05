@@ -52,6 +52,15 @@ FORM_LIMIT   = 80
 # League IDs that are preseason friendlies or cups — never used for ratings.
 # BSD uses league_id=79 for preseason/friendly fixtures across multiple teams.
 # Add any other IDs found in practice.
+# Minimum finished matches required to trust the dynamic rating over the
+# hardcoded _KNOWN_RATINGS baseline. Used both when deciding whether the
+# primary-league-only fixture set is enough on its own, and later when
+# deciding whether to use the dynamic rating at all — these two checks must
+# stay in sync, or a team can get filtered down to a small league-only set
+# that then fails the dynamic threshold even though richer data existed
+# before filtering.
+_MIN_MATCHES = 5
+
 FRIENDLY_LEAGUE_IDS = {79, 0}  # 0 = unknown/unset
 
 
@@ -208,7 +217,7 @@ def form(
     primary_league = _get_team_primary_league(team_id)
     if primary_league is not None:
         league_fixtures = [f for f in fixtures if f.get("league_id") == primary_league]
-        fixtures = league_fixtures if len(league_fixtures) >= 3 else fixtures
+        fixtures = league_fixtures if len(league_fixtures) >= _MIN_MATCHES else fixtures
 
     fixtures.sort(key=_fixture_date, reverse=True)
     fixtures = fixtures[:10]   # up to 10 most recent for decay weighting
@@ -254,7 +263,6 @@ def form(
         })
 
     # ── Rating calculation ────────────────────────────────────────────────────
-    _MIN_MATCHES = 5
     raw_att, raw_dfc = _dynamic_ratings(matches)
     if len(matches) >= _MIN_MATCHES:
         att, dfc = raw_att, raw_dfc
