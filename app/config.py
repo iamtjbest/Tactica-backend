@@ -219,3 +219,20 @@ def cache_write(key: str, data: dict):
 def cache_age(entry: dict) -> float:
     """Return seconds since entry was cached."""
     return time.time() - entry.get("_cached_at", 0)
+
+def clear_cache(prefix: str = "") -> int:
+    """Delete cached entries. With no prefix, wipes everything in CACHE_DIR.
+    With a prefix (e.g. 'form_v7__'), only deletes matching keys.
+    Returns the number of files deleted."""
+    deleted = 0
+    for fname in os.listdir(CACHE_DIR):
+        if not fname.endswith(".json"):
+            continue
+        if prefix and not fname.startswith(prefix):
+            continue
+        try:
+            os.remove(os.path.join(CACHE_DIR, fname))
+            deleted += 1
+        except OSError:
+            pass
+    return deleted
