@@ -22,7 +22,7 @@ def _save_players(db):
 
 @router.get("/squad")
 def squad(team: str = Query(..., description="Team name (any European club or national team)")):
-    cache_key = f"squad_v9__{team.lower().replace(' ','_')}"
+    cache_key = f"squad_v10__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
 
     if cached and cache_age(cached) < SQUAD_TTL and len(cached.get("players", [])) >= 15:
@@ -180,6 +180,27 @@ def squad(team: str = Query(..., description="Team name (any European club or na
             {"Name": "Stefan Ortega", "Pos": "GK", "SpecPos": "GK", "Min": 600, "G_A": 0},
             {"Name": "Matheus Nunes", "Pos": "MF", "SpecPos": "CM", "Min": 1400, "G_A": 4},
             {"Name": "Jack Grealish", "Pos": "FW", "SpecPos": "LW", "Min": 1600, "G_A": 7},
+        "Real Madrid": [
+            {"Name": "Thibaut Courtois", "Pos": "GK", "SpecPos": "GK", "Min": 2800, "G_A": 0},
+            {"Name": "Dani Carvajal", "Pos": "DF", "SpecPos": "RB", "Min": 2400, "G_A": 6},
+            {"Name": "Éder Militão", "Pos": "DF", "SpecPos": "CB", "Min": 2500, "G_A": 2},
+            {"Name": "Antonio Rüdiger", "Pos": "DF", "SpecPos": "CB", "Min": 2900, "G_A": 3},
+            {"Name": "Ferland Mendy", "Pos": "DF", "SpecPos": "LB", "Min": 2300, "G_A": 1},
+            {"Name": "Aurélien Tchouaméni", "Pos": "MF", "SpecPos": "DM", "Min": 2600, "G_A": 4},
+            {"Name": "Federico Valverde", "Pos": "MF", "SpecPos": "CM", "Min": 3000, "G_A": 12},
+            {"Name": "Jude Bellingham", "Pos": "MF", "SpecPos": "CAM", "Min": 2900, "G_A": 28},
+            {"Name": "Rodrygo", "Pos": "FW", "SpecPos": "RW", "Min": 2600, "G_A": 20},
+            {"Name": "Vinícius Júnior", "Pos": "FW", "SpecPos": "LW", "Min": 2850, "G_A": 33},
+            {"Name": "Kylian Mbappé", "Pos": "FW", "SpecPos": "ST", "Min": 2900, "G_A": 35},
+            {"Name": "Luka Modrić", "Pos": "MF", "SpecPos": "CM", "Min": 1800, "G_A": 9},
+            {"Name": "Eduardo Camavinga", "Pos": "MF", "SpecPos": "CM", "Min": 2100, "G_A": 5},
+            {"Name": "Brahim Díaz", "Pos": "FW", "SpecPos": "RW", "Min": 1700, "G_A": 14},
+            {"Name": "Endrick", "Pos": "FW", "SpecPos": "ST", "Min": 1200, "G_A": 8},
+            {"Name": "Lucas Vázquez", "Pos": "DF", "SpecPos": "RB", "Min": 1500, "G_A": 7},
+            {"Name": "Fran García", "Pos": "DF", "SpecPos": "LB", "Min": 1400, "G_A": 3},
+            {"Name": "Andriy Lunin", "Pos": "GK", "SpecPos": "GK", "Min": 800, "G_A": 0},
+            {"Name": "Dani Ceballos", "Pos": "MF", "SpecPos": "CM", "Min": 900, "G_A": 2},
+            {"Name": "Arda Güler", "Pos": "MF", "SpecPos": "CAM", "Min": 1300, "G_A": 10},
         ],
     }
 
