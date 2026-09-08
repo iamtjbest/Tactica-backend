@@ -202,6 +202,7 @@ def squad(team: str = Query(..., description="Team name (any European club or na
             {"Name": "Stefan Ortega", "Pos": "GK", "SpecPos": "GK", "Min": 600, "G_A": 0},
             {"Name": "Matheus Nunes", "Pos": "MF", "SpecPos": "CM", "Min": 1400, "G_A": 4},
             {"Name": "Jack Grealish", "Pos": "FW", "SpecPos": "LW", "Min": 1600, "G_A": 7},
+        ],
         "Real Madrid": [
             {"Name": "Thibaut Courtois", "Pos": "GK", "SpecPos": "GK", "Min": 2800, "G_A": 0},
             {"Name": "Dani Carvajal", "Pos": "DF", "SpecPos": "RB", "Min": 2400, "G_A": 6},
