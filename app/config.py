@@ -116,13 +116,27 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
     Search BSD for a team by name. Returns (team_id, matched_name) or (None, None).
     Filters out reserve/youth/women teams unless specifically requested.
     """
-    RESERVE_KEYWORDS = (" B", " II", " 2", " U21", " U23", " U19", " U18", " LFC", " WOMEN", " FEMENINO", " YOUTH")
+    # Short/ambiguous — must appear as a whole word (space-prefixed) to avoid
+    # false positives inside ordinary club names.
+    RESERVE_WORD_KEYWORDS = (" B", " II", " 2", " U21", " U23", " U19", " U18", " LFC", " YOUTH")
+
+    # Women's-team indicators — long and unambiguous enough that a plain
+    # substring check is safe, and it catches real-world formatting BSD uses
+    # that a space-prefix check would miss, e.g. "Real Madrid (Women)",
+    # "Real Madrid Femenina" (vs. "Femenino"), "Real Madrid CF Femenino".
+    RESERVE_SUBSTRING_KEYWORDS = (
+        "WOMEN", "WOMAN", "LADIES", "FEMENINO", "FEMENINA", "FEMENÍ",
+        "FEMALE", "FEMMINILE", "FÉMININE", "FEMININE", "DAMEN",
+    )
 
     def _is_reserve(tname: str) -> bool:
         t_upper = tname.upper()
         # Only treat as reserve if query didn't ask for reserve/youth keywords
         q_upper = name.upper()
-        for kw in RESERVE_KEYWORDS:
+        for kw in RESERVE_WORD_KEYWORDS:
+            if kw in t_upper and kw not in q_upper:
+                return True
+        for kw in RESERVE_SUBSTRING_KEYWORDS:
             if kw in t_upper and kw not in q_upper:
                 return True
         return False
