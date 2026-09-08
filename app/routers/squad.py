@@ -22,7 +22,7 @@ def _save_players(db):
 
 @router.get("/squad")
 def squad(team: str = Query(..., description="Team name (any European club or national team)")):
-    cache_key = f"squad_v10__{team.lower().replace(' ','_')}"
+    cache_key = f"squad_v11__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
 
     if cached and cache_age(cached) < SQUAD_TTL and len(cached.get("players", [])) >= 15:
@@ -32,6 +32,28 @@ def squad(team: str = Query(..., description="Team name (any European club or na
             "count":     len(cached.get("players",[])),
             "players":   cached.get("players",[]),
             "cached":    True,
+        }
+
+    # Direct senior squad check for known clubs
+    fb = None
+    for k, v in KNOWN_SQUADS.items():
+        if k.lower() in team.lower() or team.lower() in k.lower():
+            fb = (k, v)
+            break
+
+    if fb:
+        bsd_name, players = fb[0], fb[1]
+        entry = {"_cached_at": time.time(), "bsd_name": bsd_name, "players": players}
+        cache_write(cache_key, entry)
+        db = _load_players()
+        db[team] = players
+        _save_players(db)
+        return {
+            "team_name": team,
+            "bsd_name":  bsd_name,
+            "count":     len(players),
+            "players":   players,
+            "cached":    False,
         }
 
     # Resolve team_id
