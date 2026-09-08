@@ -137,7 +137,7 @@ def _fixture_date(fix: dict) -> str:
 
 
 _KNOWN_RATINGS: dict[str, tuple[int, int]] = {
-    "Real Madrid":(88,88),"Barcelona":(87,85),"FC Barcelona":(87,85),"Manchester City":(87,86),
+    "Real Madrid":(88,88),"Real Madrid CF":(88,88),"Barcelona":(87,85),"FC Barcelona":(87,85),"Manchester City":(87,86),
     "Liverpool":(85,84),"Liverpool FC":(85,84),"Bayern Munich":(86,87),"FC Bayern München":(86,87),
     "Paris Saint-Germain":(85,83),"Arsenal":(82,82),"Inter Milan":(80,85),"Inter":(80,85),
     "Atletico Madrid":(78,86),"Atlético Madrid":(78,86),"Borussia Dortmund":(80,78),
