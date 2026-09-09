@@ -77,6 +77,7 @@ LEAGUE_WEIGHTS: dict[str, float] = {
 
 
 # ── Position mapping from BSD specific_position ──────────────────────────────
+# Exact abbreviation matches (fast path)
 SPECIFIC_POS_MAP = {
     "GK":"GK",
     "CB":"DF","RB":"DF","LB":"DF","RWB":"DF","LWB":"DF","SW":"DF",
@@ -87,13 +88,44 @@ SPECIFIC_POS_MAP = {
 }
 GENERIC_POS_MAP = {"G":"GK","D":"DF","M":"MF","F":"FW"}
 
+# Fallback keyword matching for full-word labels some providers send
+# instead of abbreviations (e.g. "Goalkeeper", "Centre Back", "Right Wing").
+# Checked as substrings, most specific first, so "Defensive Midfielder"
+# matches MIDFIELD before "Defensive" could wrongly suggest DF.
+_POSITION_KEYWORDS = (
+    ("GOALKEEPER", "GK"), ("KEEPER", "GK"),
+    ("WING BACK", "DF"), ("WINGBACK", "DF"), ("BACK", "DF"), ("DEFENDER", "DF"), ("DEFENCE", "DF"), ("DEFENSE", "DF"),
+    ("MIDFIELD", "MF"),
+    ("WING", "FW"), ("WINGER", "FW"), ("STRIKER", "FW"), ("FORWARD", "FW"), ("ATTACK", "FW"),
+)
+
+def _keyword_position(text: str) -> str | None:
+    t = text.strip().upper()
+    for kw, pos in _POSITION_KEYWORDS:
+        if kw in t:
+            return pos
+    return None
+
 def resolve_position(generic: str, specific: str) -> str:
-    """Return internal position (GK/DF/MF/FW) using specific_position first."""
+    """Return internal position (GK/DF/MF/FW). Tries, in order: exact
+    specific_position abbreviation, keyword match on specific_position
+    (handles full-word labels), exact generic abbreviation, keyword match
+    on generic, then MF as a last-resort default."""
     if specific:
         sp = specific.strip().upper()
         if sp in SPECIFIC_POS_MAP:
             return SPECIFIC_POS_MAP[sp]
-    return GENERIC_POS_MAP.get((generic or "M").strip().upper(), "MF")
+        kw = _keyword_position(sp)
+        if kw:
+            return kw
+    if generic:
+        g = generic.strip().upper()
+        if g in GENERIC_POS_MAP:
+            return GENERIC_POS_MAP[g]
+        kw = _keyword_position(g)
+        if kw:
+            return kw
+    return "MF"
 
 # ── BSD HTTP helpers ──────────────────────────────────────────────────────────
 def bsd_get(path: str, params: dict = None) -> dict | None:
