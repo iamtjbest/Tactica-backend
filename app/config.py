@@ -127,6 +127,42 @@ def resolve_position(generic: str, specific: str) -> str:
             return kw
     return "MF"
 
+# Canonical display-slot labels — always one of this fixed set, regardless
+# of whatever raw format BSD sends (abbreviation, full word, mixed case).
+# Order matters: checked most-specific-first so e.g. "Right Wing Back"
+# matches RWB before the generic "BACK" -> DF keyword could misfire.
+_CANONICAL_SLOT_KEYWORDS = (
+    ("GOALKEEPER", "GK"), ("KEEPER", "GK"), ("GK", "GK"),
+    ("RIGHT WING BACK", "RWB"), ("RIGHT WINGBACK", "RWB"), ("RWB", "RWB"),
+    ("LEFT WING BACK", "LWB"), ("LEFT WINGBACK", "LWB"), ("LWB", "LWB"),
+    ("RIGHT BACK", "RB"), ("RB", "RB"),
+    ("LEFT BACK", "LB"), ("LB", "LB"),
+    ("CENTRE BACK", "CB"), ("CENTER BACK", "CB"), ("CB", "CB"), ("SWEEPER", "CB"), ("SW", "CB"),
+    ("DEFENSIVE MID", "DM"), ("CDM", "DM"), ("DM", "DM"),
+    ("ATTACKING MID", "AM"), ("CAM", "AM"), ("AM", "AM"),
+    ("CENTRE MID", "CM"), ("CENTER MID", "CM"), ("CM", "CM"),
+    ("RIGHT WING", "RW"), ("RW", "RW"), ("RM", "RW"), ("RIGHT MID", "RW"),
+    ("LEFT WING", "LW"), ("LW", "LW"), ("LM", "LW"), ("LEFT MID", "LW"),
+    ("STRIKER", "ST"), ("CENTRE FORWARD", "ST"), ("CENTER FORWARD", "ST"), ("ST", "ST"), ("CF", "ST"), ("SS", "ST"),
+    # Broad fallbacks if nothing more specific matched
+    ("DEFENDER", "CB"), ("DEFENCE", "CB"), ("DEFENSE", "CB"), ("BACK", "CB"),
+    ("MIDFIELD", "CM"),
+    ("FORWARD", "ST"), ("ATTACK", "ST"), ("WING", "RW"),
+)
+
+def canonical_slot_label(generic: str, specific: str) -> str:
+    """Return one clean, consistent slot label (GK/RB/CB/LB/RWB/LWB/DM/CM/AM/RW/LW/ST)
+    for DISPLAY purposes, regardless of whatever raw format the source uses."""
+    for text in (specific, generic):
+        if not text:
+            continue
+        t = text.strip().upper()
+        for kw, label in _CANONICAL_SLOT_KEYWORDS:
+            if kw == t or kw in t:
+                return label
+    return "CM"
+
+
 # ── BSD HTTP helpers ──────────────────────────────────────────────────────────
 def bsd_get(path: str, params: dict = None) -> dict | None:
     """GET from BSD API. Returns parsed JSON or None on error."""
