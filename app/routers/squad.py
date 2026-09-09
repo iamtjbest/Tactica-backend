@@ -225,7 +225,12 @@ def squad(
                 fb = v
                 break
         if fb:
-            players = fb
+            # KNOWN_SQUADS is a static, hand-maintained reference snapshot —
+            # not live data, and its Min/G_A figures are stale full-season
+            # totals that will be wrong early in a new season. Mark it so
+            # a consumer can flag it as an estimate rather than presenting
+            # it as this season's real numbers.
+            players = [dict(p, stats_real=False) for p in fb]
 
     # Save to cache and players.json
     entry = {"_cached_at": time.time(), "bsd_name": bsd_name, "players": players}
