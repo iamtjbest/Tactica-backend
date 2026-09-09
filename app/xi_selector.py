@@ -2,7 +2,7 @@
 app/xi_selector.py — formation-aware Starting XI selection
 """
 import re, difflib, json, os
-from app.config import SPECIFIC_POS_MAP, GENERIC_POS_MAP
+from app.config import resolve_position
 
 PLAYERS_PATH = os.environ.get("PLAYERS_PATH", "players.json")
 
@@ -16,11 +16,7 @@ def load_players() -> dict:
 WIDE_ATT = {"RM","LM","RW","LW","RWF","LWF","SS","WF"}
 
 def get_pos(generic: str, specific: str) -> str:
-    if specific:
-        sp = specific.strip().upper()
-        if sp in SPECIFIC_POS_MAP:
-            return SPECIFIC_POS_MAP[sp]
-    return GENERIC_POS_MAP.get((generic or "M").strip().upper(), "MF")
+    return resolve_position(generic, specific)
 
 def _forwards_in_formation(formation: str) -> int:
     parts = [int(x) for x in re.findall(r"\d+", formation)]
@@ -120,9 +116,12 @@ def select_xi(team_name: str, formation: str, players_db: dict = None) -> list[d
     n = draft("MF", mid_count);  draft_fallback("MF", mid_count - n) if n < mid_count else None
     n = draft("FW", att_count);  draft_fallback("FW", att_count - n) if n < att_count else None
 
-    # Emergency pad if still short (data gaps)
+    # Emergency pad if still short (data gaps). Never add a second GK --
+    # exactly one GK slot exists and it's already filled by draft("GK", 1)
+    # above; a backup keeper left unclaimed must stay unclaimed here.
     for p in roster:
         if len(xi) >= 11: break
+        if p["_resolved_pos"] == "GK": continue
         if p["Name"] not in named:
             xi.append({
                 "name": p["Name"], "pos": p["_resolved_pos"],
