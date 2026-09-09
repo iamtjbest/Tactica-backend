@@ -6,7 +6,7 @@ Returns: { team_name, bsd_name, count, players[] }
 import time, json, os
 from fastapi import APIRouter, Query, HTTPException
 from app.config import bsd_get, bsd_find_team, cache_read, cache_write, cache_age
-from app.config import SPECIFIC_POS_MAP, GENERIC_POS_MAP, resolve_position
+from app.config import SPECIFIC_POS_MAP, GENERIC_POS_MAP, resolve_position, canonical_slot_label
 
 router   = APIRouter()
 PLAYERS  = os.environ.get("PLAYERS_PATH", "players.json")
@@ -140,7 +140,13 @@ def squad(
         raise HTTPException(status_code=502, detail="BSD API error fetching squad.")
 
     players = []
+    _raw_debug = None
     for idx, p in enumerate(data.get("results", [])):
+        if _raw_debug is None:
+            # Capture the very first raw player object untouched, so we can
+            # see BSD's actual field names/values instead of guessing them.
+            _raw_debug = dict(p)
+
         name = p.get("name") or p.get("short_name","")
         if not name or name.strip() in ("","None","null"):
             continue
@@ -164,7 +170,7 @@ def squad(
         players.append({
             "Name":         name.strip(),
             "Pos":          pos,
-            "SpecPos":      spec or gen,
+            "SpecPos":      canonical_slot_label(gen, spec),
             "Min":          raw_mins,
             "G_A":          raw_ga,
             "stats_real":   stats_real,
@@ -193,7 +199,7 @@ def squad(
                         gen = str(lp.get("position") or "M").strip().upper()
                         pos = resolve_position(gen, spec)
                         if p_name not in lineup_players:
-                            lineup_players[p_name] = {"Name": p_name, "Pos": pos, "SpecPos": spec or gen, "appearances": 0}
+                            lineup_players[p_name] = {"Name": p_name, "Pos": pos, "SpecPos": canonical_slot_label(gen, spec), "appearances": 0}
                         lineup_players[p_name]["appearances"] += 1
             if lineup_players:
                 extracted = []
@@ -246,4 +252,5 @@ def squad(
         "count":     len(players),
         "players":   players,
         "cached":    False,
+        "_debug_raw_first_player": _raw_debug,
     }
