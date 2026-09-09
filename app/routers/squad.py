@@ -112,28 +112,14 @@ def _save_players(db):
     except: pass
 
 @router.get("/squad")
-def squad(team: str = Query(..., description="Team name (any European club or national team)")):
-    # Direct senior squad check for known clubs
-    fb = None
-    for k, v in KNOWN_SQUADS.items():
-        if k.lower() in team.lower() or team.lower() in k.lower():
-            fb = (k, v)
-            break
-
-    if fb:
-        bsd_name, players = fb[0], fb[1]
-        return {
-            "team_name": team,
-            "bsd_name":  bsd_name,
-            "count":     len(players),
-            "players":   players,
-            "cached":    False,
-        }
-
+def squad(
+    team: str = Query(..., description="Team name (any European club or national team)"),
+    refresh: bool = Query(False, description="Skip the 7-day cache and fetch fresh from BSD"),
+):
     cache_key = f"squad_v12__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
 
-    if cached and cache_age(cached) < SQUAD_TTL and len(cached.get("players", [])) >= 15:
+    if not refresh and cached and cache_age(cached) < SQUAD_TTL and len(cached.get("players", [])) >= 15:
         return {
             "team_name": team,
             "bsd_name":  cached.get("bsd_name", team),
@@ -168,16 +154,20 @@ def squad(team: str = Query(..., description="Team name (any European club or na
         assists  = int(p.get("assists") or 0)
         raw_ga   = int(p.get("g_a") or p.get("goals_and_assists") or (goals + assists))
 
-        # Fallback for unpopulated BSD stats so Min and G+A are realistic for ranking
-        mins = raw_mins if raw_mins > 0 else max(270, 2520 - (idx * 65))
-        g_a  = raw_ga if raw_ga > 0 else (max(0, 14 - idx) if pos in ("FW", "MF") and idx < 10 else 0)
+        # If BSD genuinely has no stats for this player yet, say so honestly
+        # rather than inventing plausible-looking numbers from squad-list
+        # order. Fabricated numbers are indistinguishable from real ones
+        # once they reach the XI selector's ranking, which defeats the
+        # point of ranking by merit at all.
+        stats_real = raw_mins > 0 or raw_ga > 0
 
         players.append({
-            "Name":    name.strip(),
-            "Pos":     pos,
-            "SpecPos": spec or gen,
-            "Min":     mins,
-            "G_A":     g_a,
+            "Name":         name.strip(),
+            "Pos":          pos,
+            "SpecPos":      spec or gen,
+            "Min":          raw_mins,
+            "G_A":          raw_ga,
+            "stats_real":   stats_real,
         })
 
     # If /players/ returned sparse results, extract squad from recent match lineups
@@ -208,16 +198,23 @@ def squad(team: str = Query(..., description="Team name (any European club or na
             if lineup_players:
                 extracted = []
                 sorted_lp = sorted(lineup_players.values(), key=lambda x: x["appearances"], reverse=True)
-                for idx, lp in enumerate(sorted_lp):
+                for lp in sorted_lp:
                     pos = lp["Pos"]
-                    mins = max(270, 2520 - (idx * 65))
-                    g_a = max(0, 14 - idx) if pos in ("FW", "MF") and idx < 10 else 0
+                    # This fallback path only ever observes appearance COUNT
+                    # (how many of the last 10 fixtures this player featured
+                    # in) — real data, unlike the old index-based formula.
+                    # It never observes real minutes or G+A, so don't invent
+                    # them: derive a minutes estimate from the one real
+                    # signal we have, and mark G+A as unavailable rather
+                    # than fabricating a plausible-looking number.
+                    mins = lp["appearances"] * 90
                     extracted.append({
-                        "Name": lp["Name"],
-                        "Pos": pos,
-                        "SpecPos": lp["SpecPos"],
-                        "Min": mins,
-                        "G_A": g_a,
+                        "Name":       lp["Name"],
+                        "Pos":        pos,
+                        "SpecPos":    lp["SpecPos"],
+                        "Min":        mins,
+                        "G_A":        0,
+                        "stats_real": False,
                     })
                 players = extracted
 
