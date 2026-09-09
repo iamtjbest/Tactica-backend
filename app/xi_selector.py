@@ -93,6 +93,50 @@ def select_xi(team_name: str, formation: str, players_db: dict = None) -> list[d
                 drafted += 1
         return drafted
 
+    def draft_slot(spec_label, n):
+        """Draft by exact canonical SpecPos label (e.g. 'CB', 'RB')."""
+        drafted = 0
+        for p in roster:
+            if drafted >= n: break
+            if p["Name"] in named: continue
+            if str(p.get("SpecPos","")).strip().upper() == spec_label:
+                xi.append({
+                    "name": p["Name"], "pos": "DF",
+                    "spec_pos": p.get("SpecPos",""),
+                    "minutes": p.get("Min",0), "g_a": p.get("G_A",0),
+                    "fallback": False,
+                })
+                named.add(p["Name"])
+                drafted += 1
+        return drafted
+
+    def draft_defense(def_count):
+        """Fill the back line by specific slot (CB/RB/LB/RWB/LWB), not just
+        'any 4 defenders' — this is what keeps a back four from turning
+        into 3 CBs and 1 full-back with no cover on the other flank."""
+        if def_count == 3:
+            target = {"CB": 3}
+        elif def_count == 5:
+            target = {"CB": 3, "RB": 1, "LB": 1}
+        else:  # 4, or anything else — standard back four shape
+            target = {"CB": 2, "RB": 1, "LB": 1}
+            # spread any extra/short slots evenly across CB
+            if def_count != 4:
+                target["CB"] += (def_count - 4)
+
+        filled = 0
+        for label, want in target.items():
+            filled += draft_slot(label, want)
+        # RWB/LWB as fallback fits for RB/LB if no specialist full-back exists
+        if filled < def_count:
+            for label in ("RWB", "LWB"):
+                if filled >= def_count: break
+                filled += draft_slot(label, def_count - filled)
+        # Anyone still short: any remaining defender, regardless of exact slot
+        if filled < def_count:
+            filled += draft_fallback("DF", def_count - filled)
+        return filled
+
     def draft_fallback(pos, n):
         """Second pass — relax wide-attacker constraint."""
         drafted = 0
@@ -112,7 +156,7 @@ def select_xi(team_name: str, formation: str, players_db: dict = None) -> list[d
 
     # Draft in positional order
     draft("GK", 1)
-    n = draft("DF", def_count);  draft_fallback("DF", def_count - n) if n < def_count else None
+    n = draft_defense(def_count)
     n = draft("MF", mid_count);  draft_fallback("MF", mid_count - n) if n < mid_count else None
     n = draft("FW", att_count);  draft_fallback("FW", att_count - n) if n < att_count else None
 
