@@ -1092,6 +1092,7 @@ def _best_starting_xi(squad: list[dict]) -> tuple[list[dict], list[dict], str]:
 def squad_analysis(
     player_ids: str = Query(..., description="15 comma-separated FPL player IDs"),
     bank:       float = Query(0.0, description="Money left in the bank, £m", ge=0, le=50),
+    refresh:    bool = Query(False, description="Skip cache and recompute fresh"),
 ):
     try:
         ids = [int(x.strip()) for x in player_ids.split(",") if x.strip()]
@@ -1100,9 +1101,13 @@ def squad_analysis(
     if len(ids) != 15 or len(set(ids)) != 15:
         raise HTTPException(400, f"Expected exactly 15 unique player IDs, got {len(set(ids))}.")
 
-    cache_key = f"fpl_squad_v1__{'_'.join(map(str, sorted(ids)))}__{bank}"
+    # v2: bumped from v1 because the response shape changed (chip_advice
+    # replaced chip_suggestion, transfer_suggestions is now capped at 3) —
+    # a v1-keyed cache entry would still have the old shape and silently
+    # look like the fix didn't work.
+    cache_key = f"fpl_squad_v2__{'_'.join(map(str, sorted(ids)))}__{bank}"
     cached    = cache_read(cache_key)
-    if cached and cache_age(cached) < SQUAD_TTL:
+    if not refresh and cached and cache_age(cached) < SQUAD_TTL:
         cached["cached"] = True
         return cached
 
