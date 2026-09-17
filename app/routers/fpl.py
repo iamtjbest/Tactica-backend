@@ -41,35 +41,117 @@ def _team_counts(squad: list[dict]) -> dict:
     return counts
 
 def _current_gameweek() -> int:
-    """Fetch current gameweek from the FPL bootstrap data (cached)."""
-    bootstrap = cache_read("fpl_raw_bootstrap")
-    if not bootstrap or cache_age(bootstrap) > FPL_TTL:
-        try:
-            resp = requests.get(FPL_URL, timeout=10, headers={"User-Agent": "Tactica/1.0"})
-            resp.raise_for_status()
-            bootstrap = resp.json()
-            cache_write("fpl_raw_bootstrap", bootstrap)
-        except Exception:
-            return 0
-    if not bootstrap or not isinstance(bootstrap, dict):
-        return 0
-    events = bootstrap.get("events", [])
-    for ev in events:
-        if ev.get("is_current"):
-            return ev.get("id", 0)
-    return 0
+    """Current gameweek, from the same cached bootstrap data everything
+    else uses — avoids a second, separately-cached fetch that could
+    disagree with _get_fpl_data()'s view of the current gameweek."""
+    return _get_fpl_data().get("current_event", 0)
 
-def _suggest_chip(gameweek: int) -> str | None:
-    """Return a chip suggestion based on the current gameweek.
-    Simple heuristic – can be refined later.
+FIRST_HALF_DEADLINE_GW = 19  # one of each chip must be used by this GW or it's lost
+
+def _rank_chips(squad: list[dict], starting: list[dict], bench: list[dict],
+                 captain: dict, current_gw: int) -> list[dict]:
+    """Rank Wildcard / Free Hit / Bench Boost / Triple Captain by how
+    attractive each looks for THIS gameweek, using signals we can
+    actually derive from current squad + fixture data.
+
+    2026/27 rules: 8 chips total, two of each (Wildcard, Free Hit,
+    Bench Boost, Triple Captain), split into two halves of the season.
+    One of each must be used before the Gameweek 19 deadline or that
+    half's copy is lost — it does not roll into the second half.
+
+    Known limitation: this does not know which chips the user has
+    already used (the endpoint is stateless — that would need to be
+    passed in as an input for fully personalised advice), and it does
+    not detect true double/blank gameweeks, which need FPL's per-team
+    fixture COUNT for a given gameweek, a different endpoint
+    (/api/fixtures/?event=X) not currently fetched here. Bench Boost
+    and Free Hit scoring below are fixture-difficulty proxies, not
+    confirmed DGW/BGW signals — flagged in each chip's reason text.
     """
-    if 1 <= gameweek <= 3:
-        return "Free Hit"
-    if 4 <= gameweek <= 7:
-        return "Bench Boost"
-    if 8 <= gameweek <= 12:
-        return "Triple Captain"
-    return None
+    half = 1 if current_gw <= FIRST_HALF_DEADLINE_GW else 2
+    gws_to_deadline = (FIRST_HALF_DEADLINE_GW - current_gw) if half == 1 else None
+
+    flagged_count = sum(1 for p in squad if p.get("status") in BAD_STATUS)
+    scores        = sorted((p["weighted_score"] for p in squad))
+    weak_count    = sum(1 for s in scores if s < scores[len(scores)//2] * 0.6) if scores else 0
+
+    # Triple Captain: reward an easy fixture (low FDR) and a captain who
+    # clearly separates from the chasing pack in weighted score.
+    cap_fdr    = captain["next_fixture"].get("fdr", 3)
+    others     = sorted((p["weighted_score"] for p in starting if p["id"] != captain["id"]), reverse=True)
+    cap_margin = (captain["weighted_score"] / others[0]) if others and others[0] > 0 else 1.0
+    tc_pts  = 0
+    tc_pts += 6 if cap_fdr <= 2 else (3 if cap_fdr == 3 else 0)
+    tc_pts += 4 if cap_margin >= 1.2 else (2 if cap_margin >= 1.05 else 0)
+    tc_pts  = min(tc_pts, 10)
+
+    # Bench Boost: only attractive if the bench itself is genuinely
+    # strong relative to the starting XI, not just present.
+    start_avg = sum(p["weighted_score"] for p in starting) / len(starting) if starting else 0
+    bench_avg = sum(p["weighted_score"] for p in bench) / len(bench) if bench else 0
+    bb_ratio  = (bench_avg / start_avg) if start_avg > 0 else 0
+    bb_pts  = 0
+    bb_pts += 7 if bb_ratio >= 0.8 else (4 if bb_ratio >= 0.6 else 0)
+    bb_pts += 2 if flagged_count == 0 else 0  # a clean bench with no gaps to fill first
+    bb_pts  = min(bb_pts, 10)
+
+    # Free Hit: attractive when the squad-wide fixture picture next GW
+    # is uniformly bad, or several players are unavailable at once
+    # (international-break knocks, congested-fixture rotation risk).
+    avg_fdr = sum(p["next_fixture"].get("fdr", 3) for p in squad) / len(squad) if squad else 3
+    fh_pts  = 0
+    fh_pts += 7 if avg_fdr >= 4 else (3 if avg_fdr >= 3.5 else 0)
+    fh_pts += 3 if flagged_count >= 3 else 0
+    fh_pts  = min(fh_pts, 10)
+
+    # Wildcard: attractive when the squad has real structural problems
+    # (multiple flagged/underperforming players) and/or it's a sensible
+    # seasonal window — early enough to have real data (GW4-8), or late
+    # enough in the half to be worth using before it's lost (GW15-19).
+    wc_pts  = 0
+    wc_pts += 4 if flagged_count >= 2 else (2 if flagged_count == 1 else 0)
+    wc_pts += 3 if weak_count >= 3 else (1 if weak_count >= 1 else 0)
+    if half == 1 and 4 <= current_gw <= 8:
+        wc_pts += 3
+    elif half == 1 and 15 <= current_gw <= 19:
+        wc_pts += 3
+    wc_pts = min(wc_pts, 10)
+
+    deadline_note = (f" ({gws_to_deadline} GW(s) left before your first-half chips expire at GW{FIRST_HALF_DEADLINE_GW})"
+                      if half == 1 and gws_to_deadline is not None and gws_to_deadline <= 4 else "")
+
+    chips = [
+        {
+            "chip": "Triple Captain", "score": tc_pts,
+            "reason": (f"{captain['name']} has an {_fdr_label(cap_fdr).lower()} fixture (FDR {cap_fdr}) "
+                       f"and rates {round((cap_margin-1)*100)}% above your next-best starter."),
+            "action": f"Play it on {captain['name']} if you play it this week.",
+        },
+        {
+            "chip": "Bench Boost", "score": bb_pts,
+            "reason": (f"Bench averages {round(bench_avg,2)} weighted score vs {round(start_avg,2)} for "
+                       f"your starting XI ({round(bb_ratio*100)}% as strong). Proxy signal only — "
+                       f"confirm there isn't a blank gameweek working against you before committing."),
+            "action": "Best used when your bench would start in most other squads, not just when it's fully fit.",
+        },
+        {
+            "chip": "Free Hit", "score": fh_pts,
+            "reason": (f"Squad averages FDR {round(avg_fdr,1)} next gameweek, {flagged_count} player(s) flagged. "
+                       f"Proxy signal only — a true blank gameweek (several of your players not playing at all) "
+                       f"is the strongest real trigger and isn't detected here yet."),
+            "action": "Best on a gameweek where multiple squad players don't play or face uniformly hard fixtures.",
+        },
+        {
+            "chip": "Wildcard", "score": wc_pts,
+            "reason": (f"{flagged_count} player(s) flagged, {weak_count} underperforming for their price."
+                       f"{deadline_note}"),
+            "action": "Use it to rebuild around the weak links in your transfer suggestions, not a one- or two-player patch.",
+        },
+    ]
+    chips.sort(key=lambda c: c["score"], reverse=True)
+    for c in chips:
+        c["half"] = half
+    return chips
 
 def _normalize_str(s: str) -> str:
     """Return a lower‑cased, diacritic‑free version of *s* for tolerant name matching."""
@@ -199,10 +281,22 @@ def _get_fpl_data() -> dict:
     teams      = {t["id"]: t["name"] for t in data.get("teams", [])}
     players    = data.get("elements", [])
 
+    # Current gameweek — was never actually captured here before, even
+    # though callers read fpl["current_event"]. That made it silently
+    # None on every call, and "current_gw or 0" masked it as 0, which
+    # in turn made every squad_analysis call treat itself as GW0-2 and
+    # suggest Wildcard unconditionally regardless of the real gameweek.
+    current_event = 0
+    for ev in data.get("events", []):
+        if ev.get("is_current"):
+            current_event = ev.get("id", 0)
+            break
+
     result = {
-        "players":  players,
-        "teams":    teams,
-        "_cached_at": time.time(),
+        "players":       players,
+        "teams":         teams,
+        "current_event": current_event,
+        "_cached_at":    time.time(),
     }
     cache_write(cache_key, result)
     return result
@@ -1039,13 +1133,27 @@ def squad_analysis(
     vice       = ranked_starting[1] if len(ranked_starting) > 1 else None
 
     # ── Transfer suggestions ──────────────────────────────────────────────────
+    # Only surface suggestions for the players actually worth replacing,
+    # capped at 3, instead of evaluating all 15 and returning a
+    # variable-length list. Flagged (injured/suspended/unavailable)
+    # players are forced in regardless of score, since an unavailable
+    # player is a guaranteed problem even if their weighted_score (built
+    # from past form) still looks decent. Remaining slots go to the
+    # lowest weighted_score healthy players.
     pos_id_map = {"GKP": 1, "DEF": 2, "MID": 3, "FWD": 4}
     squad_ids  = set(ids)
-    transfer_suggestions = []
 
-    # Prepare team count mapping for 3‑player rule
+    flagged_players  = [p for p in squad if p["status"] in BAD_STATUS]
+    healthy_by_score  = sorted(
+        [p for p in squad if p["status"] not in BAD_STATUS],
+        key=lambda p: p["weighted_score"],
+    )
+    remaining_slots = max(0, 3 - len(flagged_players))
+    review_targets  = flagged_players + healthy_by_score[:remaining_slots]
+
+    transfer_suggestions = []
     team_counts = _team_counts(squad)
-    for out_p in squad:
+    for out_p in review_targets:
         pos_id      = pos_id_map[out_p["position"]]
         max_budget  = round(out_p["price"] + bank, 1)
         is_flagged  = out_p["status"] in BAD_STATUS
@@ -1092,7 +1200,6 @@ def squad_analysis(
             "in": best_candidate,
             "reason": reason,
             "flagged": is_flagged,
-            "suggested_chip": _suggest_chip(_current_gameweek()),
         })
 
     transfer_suggestions.sort(key=lambda t: (not t["flagged"],
@@ -1106,14 +1213,11 @@ def squad_analysis(
         cap_text += f"Suggested transfer: {t['out']['name']} ➡ {t['in']['name']}\n"
     cap_text += "via @TacticaEngine · app.tactica.com.ng/fpl #FPL #MySquad"
 
-    # Chip suggestion based on current gameweek
-    current_gw = fpl.get("current_event") or 0
-    if current_gw <= 2:
-        chip = "Wildcard"
-    elif current_gw >= 20:
-        chip = "Bench Boost"
-    else:
-        chip = None
+    # Chip advice — GW comes from fpl["current_event"], now actually
+    # populated by _get_fpl_data() (see fix above). Ranked across all
+    # four chip types with reasoning, not a single flat guess.
+    current_gw  = fpl.get("current_event", 0)
+    chip_advice = _rank_chips(squad, starting, bench, captain, current_gw)
 
     result = {
         "formation": formation,
@@ -1125,7 +1229,8 @@ def squad_analysis(
         "bank": bank,
         "transfer_suggestions": transfer_suggestions,
         "share_text": cap_text,
-        "chip_suggestion": chip,
+        "current_gameweek": current_gw,
+        "chip_advice": chip_advice,
         "cached": False, "_cached_at": time.time(),
     }
     cache_write(cache_key, result)
