@@ -28,6 +28,17 @@ LEAGUE_NAMES = {
     203:"Süper Lig", 197:"Austrian Bundesliga",
 }
 
+# BSD sometimes has a women's-team entry that shares the exact same name
+# as the men's team with zero distinguishing text (e.g. bsd_name comes
+# back as plain "Real Sociedad" for the women's side too) — no name-based
+# filter can catch that. league_id is a much stronger, name-independent
+# signal. Confirmed live via /form's _debug block on 2026-09-17: team_id
+# 924 ("Real Sociedad") returned 33 fixtures ALL tagged league_id 36,
+# against opponents including Atlético Madrid and Barcelona — both clubs
+# with strong women's sides — confirming league_id 36 is Spain's Liga F
+# (women's top flight), not the men's La Liga (league_id 8).
+WOMENS_LEAGUE_IDS = {36}
+
 # ── League quality weight (for national team rating calc) ────────────────────
 LEAGUE_WEIGHTS: dict[str, float] = {
     # England (Premier League, Championship)
@@ -217,8 +228,14 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         if not results:
             return None, None
 
-        # Filter out reserve/youth/women teams unless no main team exists
-        main_teams = [t for t in results if not _is_reserve(t["name"])]
+        # Filter out reserve/youth/women teams unless no main team exists.
+        # Two passes: name-based (_is_reserve) catches entries like "Real
+        # Madrid (Women)" that have distinguishing text; league_id-based
+        # catches entries that don't (plain "Real Sociedad" for the women's
+        # team too) — see WOMENS_LEAGUE_IDS for the evidence behind this.
+        main_teams = [t for t in results
+                      if not _is_reserve(t["name"])
+                      and t.get("league_id") not in WOMENS_LEAGUE_IDS]
         candidates = main_teams if main_teams else results
 
         # Prioritize entries in major leagues (LEAGUE_NAMES) to avoid picking Women/Youth team entries
