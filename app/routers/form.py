@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 USE_DUMMY_DATA = os.getenv('USE_DUMMY_DATA', 'False') == 'True'
 from fastapi import APIRouter, Query, HTTPException
 from app.config import (bsd_get, bsd_find_team, cache_read, cache_write,
-                        cache_age, LEAGUE_NAMES)
+                        cache_age, LEAGUE_NAMES, get_last_team_search_debug)
 
 def _get_team_primary_league(team_id: int) -> int | None:
     """Return the primary league_id for a team (e.g., Premier League).
@@ -301,6 +301,7 @@ def form(
             "after_friendly_strip":  _after_friendly_strip,
             "after_league_filter":   _after_league_filter,
             "used_dynamic_rating":   len(matches) >= _MIN_MATCHES,
+            "team_search":           get_last_team_search_debug(),
         },
     }
     cache_write(cache_key, result_doc)
