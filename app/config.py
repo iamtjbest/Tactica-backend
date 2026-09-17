@@ -206,7 +206,7 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
     """
     # Short/ambiguous — must appear as a whole word (space-prefixed) to avoid
     # false positives inside ordinary club names.
-    RESERVE_WORD_KEYWORDS = (" B", " II", " 2", " U21", " U23", " U19", " U18", " LFC", " YOUTH")
+    RESERVE_WORD_KEYWORDS = (" B", " C", " II", " III", " 2", " U21", " U23", " U19", " U18", " LFC", " YOUTH")
 
     # Women's-team indicators — long and unambiguous enough that a plain
     # substring check is safe, and it catches real-world formatting BSD uses
@@ -238,10 +238,15 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
             return None, None
 
         # Filter out reserve/youth/women teams unless no main team exists.
-        # Two passes: name-based (_is_reserve) catches entries like "Real
-        # Madrid (Women)" that have distinguishing text; league_id-based
-        # catches entries that don't (plain "Real Sociedad" for the women's
-        # team too) — see WOMENS_LEAGUE_IDS for the evidence behind this.
+        # Name-based (_is_reserve) catches entries with distinguishing text
+        # (e.g. "Real Sociedad B", "Real Madrid (Women)"). The league_id
+        # check below is currently a no-op in practice — confirmed via live
+        # debug data on 2026-09-17 that BSD's /teams/ search never
+        # populates league_id on the team object itself (always null) — but
+        # it's kept in case BSD ever starts populating it, since it's free
+        # when it doesn't. The real fix for name-indistinguishable women's
+        # entries (same bare name, no team-level league_id) lives further
+        # down, checking each candidate's actual FIXTURE league_id instead.
         main_teams = [t for t in results
                       if not _is_reserve(t["name"])
                       and t.get("league_id") not in WOMENS_LEAGUE_IDS]
@@ -264,8 +269,18 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
         active_candidates = []
         for t in candidates:
             fix_check = bsd_get(f"/teams/{t['id']}/fixtures/", params={"limit": 1})
-            if fix_check is not None and len(fix_check.get("results", [])) > 0:
-                active_candidates.append(t)
+            if fix_check is None:
+                continue
+            sample_fixtures = fix_check.get("results", [])
+            if not sample_fixtures:
+                continue
+            # BSD's /teams/ search never populates league_id on the team
+            # object itself (confirmed null across every candidate via
+            # live debug data on 2026-09-17) — only individual fixtures
+            # carry a reliable league_id. Use that instead.
+            if sample_fixtures[0].get("league_id") in WOMENS_LEAGUE_IDS:
+                continue
+            active_candidates.append(t)
         candidates = active_candidates if active_candidates else candidates
 
         # 1. Look for EXACT match (case-insensitive)
