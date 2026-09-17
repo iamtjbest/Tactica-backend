@@ -39,6 +39,15 @@ LEAGUE_NAMES = {
 # (women's top flight), not the men's La Liga (league_id 8).
 WOMENS_LEAGUE_IDS = {36}
 
+# Captures the raw /teams/ search results from the most recent
+# bsd_find_team() call, for debugging team-resolution issues without
+# needing to change bsd_find_team's return signature everywhere it's
+# called. Read via get_last_team_search_debug().
+_last_team_search_debug: dict = {}
+
+def get_last_team_search_debug() -> dict:
+    return _last_team_search_debug
+
 # ── League quality weight (for national team rating calc) ────────────────────
 LEAGUE_WEIGHTS: dict[str, float] = {
     # England (Premier League, Championship)
@@ -237,6 +246,14 @@ def bsd_find_team(name: str) -> tuple[int | None, str | None]:
                       if not _is_reserve(t["name"])
                       and t.get("league_id") not in WOMENS_LEAGUE_IDS]
         candidates = main_teams if main_teams else results
+
+        global _last_team_search_debug
+        _last_team_search_debug = {
+            "query": query,
+            "raw_results": [{"id": t.get("id"), "name": t.get("name"), "league_id": t.get("league_id")} for t in results],
+            "main_teams_after_filter": [{"id": t.get("id"), "name": t.get("name"), "league_id": t.get("league_id")} for t in main_teams],
+            "used_fallback_to_unfiltered": not main_teams,
+        }
 
         # Prioritize entries in major leagues (LEAGUE_NAMES) to avoid picking Women/Youth team entries
         candidates.sort(key=lambda t: 0 if t.get("league_id") in LEAGUE_NAMES else 1)
