@@ -295,6 +295,7 @@ def form(
         "best_formation": best_form,
         "cached":         False,
         "_debug": {
+            "_DEPLOY_MARKER":       "team-search-debug-v3-sept17",
             "team_id":               team_id,
             "primary_league":        primary_league,
             "raw_fixture_count":     _raw_fixture_count,
