@@ -756,7 +756,7 @@ def captain_pick(
     team: str = Query(..., description="FPL club name e.g. Arsenal"),
     top:  int = Query(5, ge=1, le=10),
 ):
-    cache_key = f"fpl_captain_v6__{team.lower().replace(' ','_')}"
+    cache_key = f"fpl_captain_v7__{team.lower().replace(' ','_')}"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < CAP_TTL:
         cached["cached"] = True
@@ -768,14 +768,21 @@ def captain_pick(
     fpl_team_id = None
     # Normalized matching using diacritic‑insensitive helper and short aliases
     normalized_target = _normalize_str(team)
-    # First pass: exact or startswith match on canonical names
+    # First pass: exact match only. A previous version also matched on the
+    # first 4 characters of the search term, which silently broke on any
+    # two clubs sharing a short prefix — "Manchester United" and
+    # "Manchester City" both start with "Manc", so whichever one Python
+    # happened to iterate first (confirmed live: Man City) always won,
+    # regardless of which club was actually searched for.
     for tid, tname in teams.items():
         canonical = _bsd_name(tname)
         norm_canonical = _normalize_str(canonical)
-        if norm_canonical == normalized_target or norm_canonical.startswith(normalized_target[:4]):
+        if norm_canonical == normalized_target:
             fpl_team_id = tid
             break
-    # Second pass: fallback to substring match
+    # Second pass: substring match — safe here because neither club name is
+    # a substring of the other (e.g. "manchester united" vs "manchester
+    # city" diverge right after "manchester "), unlike the removed prefix check.
     if not fpl_team_id:
         for tid, tname in teams.items():
             canonical = _bsd_name(tname)
