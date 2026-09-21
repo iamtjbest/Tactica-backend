@@ -427,9 +427,7 @@ def nations_debug_fixtures(nation_id: int):
     # current roster for national teams too.
     generic_roster = bsd_get("/players/", params={"team_id": bsd_id, "limit": 100})
     result["generic_roster_endpoint_returned_data"] = generic_roster is not None
-    result["generic_roster_sample"] = (
-        (generic_roster.get("results") or [])[:3] if isinstance(generic_roster, dict) else None
-    )
+    result["generic_roster_raw"] = generic_roster
 
     # Lead 2: retry fixtures with an explicit finished-status filter, same
     # pattern squad.py already uses successfully for clubs — the earlier
