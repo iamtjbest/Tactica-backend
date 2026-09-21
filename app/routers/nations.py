@@ -145,6 +145,51 @@ WC_NATIONS: list[dict] = [
     {"id": 46, "name": "Saudi Arabia",  "bsd_names": ["Saudi Arabia"],                                 "conf": "AFC"},
     {"id": 47, "name": "Uzbekistan",    "bsd_names": ["Uzbekistan"],                                   "conf": "AFC"},
     {"id": 48, "name": "New Zealand",   "bsd_names": ["New Zealand", "All Whites"],                   "conf": "OFC"},
+
+    # ── UEFA Nations League additions ────────────────────────────────────────
+    # The list above only ever covered World Cup 2026 qualifiers. That tournament
+    # already happened (June/July 2026); the fixture actually being played during
+    # THIS international break is the UEFA Nations League, a much wider,
+    # Europe-only field that includes plenty of countries who never qualified
+    # for the World Cup at all. Added below so those nations are selectable too.
+    {"id": 49, "name": "Albania",           "bsd_names": ["Albania"],                          "conf": "UEFA"},
+    {"id": 50, "name": "Andorra",           "bsd_names": ["Andorra"],                           "conf": "UEFA"},
+    {"id": 51, "name": "Armenia",           "bsd_names": ["Armenia"],                           "conf": "UEFA"},
+    {"id": 52, "name": "Azerbaijan",        "bsd_names": ["Azerbaijan"],                        "conf": "UEFA"},
+    {"id": 53, "name": "Belarus",           "bsd_names": ["Belarus"],                           "conf": "UEFA"},
+    {"id": 54, "name": "Bulgaria",          "bsd_names": ["Bulgaria"],                          "conf": "UEFA"},
+    {"id": 55, "name": "Cyprus",            "bsd_names": ["Cyprus"],                            "conf": "UEFA"},
+    {"id": 56, "name": "Denmark",           "bsd_names": ["Denmark", "Danmark"],                "conf": "UEFA"},
+    {"id": 57, "name": "Estonia",           "bsd_names": ["Estonia", "Eesti"],                  "conf": "UEFA"},
+    {"id": 58, "name": "Faroe Islands",     "bsd_names": ["Faroe Islands", "Faroes"],           "conf": "UEFA"},
+    {"id": 59, "name": "Finland",           "bsd_names": ["Finland", "Suomi"],                  "conf": "UEFA"},
+    {"id": 60, "name": "Georgia",           "bsd_names": ["Georgia"],                           "conf": "UEFA"},
+    {"id": 61, "name": "Gibraltar",         "bsd_names": ["Gibraltar"],                         "conf": "UEFA"},
+    {"id": 62, "name": "Greece",            "bsd_names": ["Greece", "Hellas"],                  "conf": "UEFA"},
+    {"id": 63, "name": "Hungary",           "bsd_names": ["Hungary", "Magyarorszag"],           "conf": "UEFA"},
+    {"id": 64, "name": "Iceland",           "bsd_names": ["Iceland", "Island"],                 "conf": "UEFA"},
+    {"id": 65, "name": "Italy",             "bsd_names": ["Italy", "Italia"],                   "conf": "UEFA"},
+    {"id": 66, "name": "Israel",            "bsd_names": ["Israel"],                            "conf": "UEFA"},
+    {"id": 67, "name": "Kazakhstan",        "bsd_names": ["Kazakhstan"],                        "conf": "UEFA"},
+    {"id": 68, "name": "Kosovo",            "bsd_names": ["Kosovo"],                            "conf": "UEFA"},
+    {"id": 69, "name": "Latvia",            "bsd_names": ["Latvia"],                            "conf": "UEFA"},
+    {"id": 70, "name": "Liechtenstein",     "bsd_names": ["Liechtenstein"],                     "conf": "UEFA"},
+    {"id": 71, "name": "Lithuania",         "bsd_names": ["Lithuania"],                         "conf": "UEFA"},
+    {"id": 72, "name": "Luxembourg",        "bsd_names": ["Luxembourg"],                        "conf": "UEFA"},
+    {"id": 73, "name": "Malta",             "bsd_names": ["Malta"],                             "conf": "UEFA"},
+    {"id": 74, "name": "Moldova",           "bsd_names": ["Moldova"],                           "conf": "UEFA"},
+    {"id": 75, "name": "Montenegro",        "bsd_names": ["Montenegro", "Crna Gora"],           "conf": "UEFA"},
+    {"id": 76, "name": "North Macedonia",   "bsd_names": ["North Macedonia", "Macedonia"],      "conf": "UEFA"},
+    {"id": 77, "name": "Northern Ireland",  "bsd_names": ["Northern Ireland"],                  "conf": "UEFA"},
+    {"id": 78, "name": "Poland",            "bsd_names": ["Poland", "Polska"],                  "conf": "UEFA"},
+    {"id": 79, "name": "Republic of Ireland", "bsd_names": ["Republic of Ireland", "Ireland"],  "conf": "UEFA"},
+    {"id": 80, "name": "Romania",           "bsd_names": ["Romania", "Romania"],                "conf": "UEFA"},
+    {"id": 81, "name": "San Marino",        "bsd_names": ["San Marino"],                        "conf": "UEFA"},
+    {"id": 82, "name": "Serbia",            "bsd_names": ["Serbia", "Srbija"],                  "conf": "UEFA"},
+    {"id": 83, "name": "Slovakia",          "bsd_names": ["Slovakia", "Slovensko"],             "conf": "UEFA"},
+    {"id": 84, "name": "Slovenia",          "bsd_names": ["Slovenia", "Slovenija"],             "conf": "UEFA"},
+    {"id": 85, "name": "Ukraine",           "bsd_names": ["Ukraine", "Ukraina"],                "conf": "UEFA"},
+    {"id": 86, "name": "Wales",             "bsd_names": ["Wales", "Cymru"],                    "conf": "UEFA"},
 ]
 
 _BY_ID   = {n["id"]:   n for n in WC_NATIONS}
