@@ -419,26 +419,38 @@ def nations_debug_fixtures(nation_id: int):
         fixture_list = fixtures.get("results") or []
     else:
         fixture_list = []
+    result["unfiltered_fixtures_count"] = len(fixture_list)
 
-    # A lineup can only exist for a match that's already been played — the
-    # first result BSD returns tends to be the next upcoming fixture
-    # ("notstarted"), which has no lineup yet. Look specifically for a
-    # finished one instead.
-    finished = [f for f in fixture_list if f.get("status") in ("finished", "ft", "complete")]
-    target_fixture = finished[0] if finished else (fixture_list[0] if fixture_list else None)
+    # Lead 1: the generic /players/ roster endpoint clubs use for their squad
+    # (bsd_get("/players/", {"team_id": ...})) is NOT tournament-locked the
+    # way /worldcup/squads/ is — worth checking if it returns a broader,
+    # current roster for national teams too.
+    generic_roster = bsd_get("/players/", params={"team_id": bsd_id, "limit": 100})
+    result["generic_roster_endpoint_returned_data"] = generic_roster is not None
+    result["generic_roster_sample"] = (
+        (generic_roster.get("results") or [])[:3] if isinstance(generic_roster, dict) else None
+    )
 
-    if target_fixture:
-        first_fixture_id = target_fixture.get("id") or target_fixture.get("fixture_id")
-        result["checked_fixture_status"] = target_fixture.get("status")
-        result["checked_fixture_teams"] = f"{target_fixture.get('home_team')} vs {target_fixture.get('away_team')}"
-        result["checked_fixture_date"] = target_fixture.get("event_date")
-        if first_fixture_id:
-            detail = bsd_get(f"/fixtures/{first_fixture_id}/")
-            result["first_fixture_id"] = first_fixture_id
-            result["first_fixture_detail_returned_data"] = detail is not None
-            result["first_fixture_detail_raw"] = detail
-    else:
-        result["checked_fixture_status"] = None
+    # Lead 2: retry fixtures with an explicit finished-status filter, same
+    # pattern squad.py already uses successfully for clubs — the earlier
+    # unfiltered call may have defaulted to "next upcoming only".
+    finished_fixtures = bsd_get(f"/teams/{bsd_id}/fixtures/", params={"status": "finished", "limit": 10})
+    result["finished_fixtures_endpoint_returned_data"] = finished_fixtures is not None
+    finished_list = (finished_fixtures.get("results") or []) if isinstance(finished_fixtures, dict) else []
+    result["finished_fixtures_count"] = len(finished_list)
+
+    # Lead 3: if we found a finished fixture, pull its lineup via the
+    # CORRECT endpoint pattern (/events/{id}/lineups/) — already proven
+    # working for clubs in squad.py, my earlier /fixtures/{id}/ guess was wrong.
+    if finished_list:
+        fid = finished_list[0].get("id") or finished_list[0].get("fixture_id")
+        result["checked_finished_fixture_id"] = fid
+        result["checked_finished_fixture_teams"] = f"{finished_list[0].get('home_team')} vs {finished_list[0].get('away_team')}"
+        result["checked_finished_fixture_date"] = finished_list[0].get("event_date")
+        if fid:
+            lineup = bsd_get(f"/events/{fid}/lineups/")
+            result["lineup_endpoint_returned_data"] = lineup is not None
+            result["lineup_raw"] = lineup
 
     return result
 
