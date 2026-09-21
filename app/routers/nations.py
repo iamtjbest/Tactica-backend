@@ -399,7 +399,7 @@ def nations_debug_fixtures(nation_id: int):
     if not bsd_id:
         return {"bsd_resolved": False}
 
-    fixtures = bsd_get(f"/teams/{bsd_id}/fixtures/", params={"limit": 5})
+    fixtures = bsd_get(f"/teams/{bsd_id}/fixtures/", params={"limit": 20})
     result = {
         "nation_id": nation_id,
         "bsd_team_id": bsd_id,
@@ -408,18 +408,37 @@ def nations_debug_fixtures(nation_id: int):
         "raw_fixtures_response": fixtures,
     }
 
-    # If we got fixtures, check whether the FIRST one has a detail endpoint
-    # with lineup data, same pattern as club match detail pages.
-    fixture_list = []
-    if fixtures:
-        fixture_list = fixtures.get("results") or fixtures if isinstance(fixtures, list) else []
-    if fixture_list:
-        first_fixture_id = fixture_list[0].get("id") or fixture_list[0].get("fixture_id")
+    # BUG (fixed): "fixtures.get('results') or fixtures if isinstance(...) else []"
+    # parses as "(fixtures.get('results') or fixtures) if isinstance(...) else []"
+    # — Python evaluates the `or` before the ternary. Since fixtures is a dict
+    # here, not a list, isinstance(fixtures, list) is False, so this silently
+    # returned [] every time regardless of what fixtures actually contained.
+    if isinstance(fixtures, list):
+        fixture_list = fixtures
+    elif isinstance(fixtures, dict):
+        fixture_list = fixtures.get("results") or []
+    else:
+        fixture_list = []
+
+    # A lineup can only exist for a match that's already been played — the
+    # first result BSD returns tends to be the next upcoming fixture
+    # ("notstarted"), which has no lineup yet. Look specifically for a
+    # finished one instead.
+    finished = [f for f in fixture_list if f.get("status") in ("finished", "ft", "complete")]
+    target_fixture = finished[0] if finished else (fixture_list[0] if fixture_list else None)
+
+    if target_fixture:
+        first_fixture_id = target_fixture.get("id") or target_fixture.get("fixture_id")
+        result["checked_fixture_status"] = target_fixture.get("status")
+        result["checked_fixture_teams"] = f"{target_fixture.get('home_team')} vs {target_fixture.get('away_team')}"
+        result["checked_fixture_date"] = target_fixture.get("event_date")
         if first_fixture_id:
             detail = bsd_get(f"/fixtures/{first_fixture_id}/")
             result["first_fixture_id"] = first_fixture_id
             result["first_fixture_detail_returned_data"] = detail is not None
             result["first_fixture_detail_raw"] = detail
+    else:
+        result["checked_fixture_status"] = None
 
     return result
 
