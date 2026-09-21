@@ -382,7 +382,48 @@ def nations_debug(nation_id: int):
             "first_player_raw": first, "first_5_scored": scored}
 
 
-# ── POST /api/nations/predict ─────────────────────────────────────────────────
+# ── GET /api/nations/debug-fixtures/{id} — testing for a better squad source ──
+# The WC squad endpoint (/worldcup/squads/) is locked to the actual World Cup
+# squad announcement (confirmed: call_up_date fields sit around May 2026,
+# months before any September international break fixture). It will never
+# reflect a current, non-WC call-up. This endpoint checks whether national
+# teams have fixture data the same way clubs do — if so, and if a fixture
+# includes lineup/squad info, that's a real "who actually played" signal we
+# could use instead of a caps/goals/age estimate.
+@router.get("/nations/debug-fixtures/{nation_id}")
+def nations_debug_fixtures(nation_id: int):
+    nation = _BY_ID.get(nation_id)
+    if not nation:
+        raise HTTPException(status_code=404, detail=f"Nation ID {nation_id} not found.")
+    bsd_id, bsd_name = resolve_nation_bsd_id(nation)
+    if not bsd_id:
+        return {"bsd_resolved": False}
+
+    fixtures = bsd_get(f"/teams/{bsd_id}/fixtures/", params={"limit": 5})
+    result = {
+        "nation_id": nation_id,
+        "bsd_team_id": bsd_id,
+        "bsd_team_name": bsd_name,
+        "fixtures_endpoint_returned_data": fixtures is not None,
+        "raw_fixtures_response": fixtures,
+    }
+
+    # If we got fixtures, check whether the FIRST one has a detail endpoint
+    # with lineup data, same pattern as club match detail pages.
+    fixture_list = []
+    if fixtures:
+        fixture_list = fixtures.get("results") or fixtures if isinstance(fixtures, list) else []
+    if fixture_list:
+        first_fixture_id = fixture_list[0].get("id") or fixture_list[0].get("fixture_id")
+        if first_fixture_id:
+            detail = bsd_get(f"/fixtures/{first_fixture_id}/")
+            result["first_fixture_id"] = first_fixture_id
+            result["first_fixture_detail_returned_data"] = detail is not None
+            result["first_fixture_detail_raw"] = detail
+
+    return result
+
+
 
 @router.post("/nations/predict")
 def nations_predict(body: dict):
