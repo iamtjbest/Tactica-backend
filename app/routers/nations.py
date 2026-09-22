@@ -370,8 +370,15 @@ def fetch_and_score_squad(bsd_team_id: int, nation_name: str) -> dict:
         "_cached_at":      time.time(),
         "team_id":         bsd_team_id,
         "team_name":       nation_name,
-        "attack":          max(50, min(98, attack))  if attack  is not None else None,
-        "defence":         max(50, min(98, defence)) if defence is not None else None,
+        # FIX: removed the floor at 50. It was silently hiding real, low
+        # ratings for teams with genuinely weak depth at a position (e.g.
+        # Spain and Czechia's defence still floored to exactly 50 even
+        # after the caps_score rescale — the true computed value was
+        # below that, we just couldn't see by how much). Keeping only the
+        # ceiling at 98 as a sanity cap; the floor was actively working
+        # against the goal of honest, differentiated ratings.
+        "attack":          min(98, attack)  if attack  is not None else None,
+        "defence":         min(98, defence) if defence is not None else None,
         "squad_count":     len(scored),
         "raw_player_count": len(players_raw),
         "all_players":     scored,
