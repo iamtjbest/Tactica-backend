@@ -262,7 +262,20 @@ def score_player(p: dict, for_attack: bool) -> float:
             age = 27
 
     # Sub-scores 0-100
-    caps_score = min(caps, 100)
+    # FIX: raw caps capped at literal 100 meant caps_score rarely exceeded
+    # 40-70 for even excellent, long-serving internationals — Unai Simon's
+    # 58 caps for Spain (a genuinely elite international career) only
+    # scored 58/100 here. Attackers have TWO components (goals_score,
+    # goal_rate_score) specifically built to reach near-100 for elite
+    # performers; defenders' formula leans 55% on caps_score alone, so an
+    # unreachable ceiling hurt them far more, this was the real cause of
+    # defence ratings clustering near the 50 floor, not thin data.
+    # 75 caps is a realistic "very experienced starter" benchmark — still
+    # achievable by a genuine first-choice international, without needing
+    # 100+ caps (a tier reached by only a handful of all-time greats) just
+    # to stop being penalised.
+    CAPS_BENCHMARK = 75
+    caps_score = min((caps / CAPS_BENCHMARK) * 100, 100)
 
     goals_cap   = 30 if for_attack else 10
     goals_score = min((goals / goals_cap) * 100, 100)
