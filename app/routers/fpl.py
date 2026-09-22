@@ -139,13 +139,15 @@ def _rank_chips(squad: list[dict], starting: list[dict], bench: list[dict],
             "reason": (f"Squad averages FDR {round(avg_fdr,1)} next gameweek, {flagged_count} player(s) flagged. "
                        f"Proxy signal only — a true blank gameweek (several of your players not playing at all) "
                        f"is the strongest real trigger and isn't detected here yet."),
-            "action": "Best on a gameweek where multiple squad players don't play or face uniformly hard fixtures.",
+            "action": "See the suggested squad below, built and optimised for just this one gameweek.",
+            "suggested_squad_endpoint": "/api/fpl/freehit-squad",
         },
         {
             "chip": "Wildcard", "score": wc_pts,
             "reason": (f"{flagged_count} player(s) flagged, {weak_count} underperforming for their price."
                        f"{deadline_note}"),
-            "action": "Use it to rebuild around the weak links in your transfer suggestions, not a one- or two-player patch.",
+            "action": "See the suggested squad below, built using average fixture difficulty over the next 5 gameweeks so it holds up past just this one week.",
+            "suggested_squad_endpoint": "/api/fpl/wildcard-squad",
         },
     ]
     chips.sort(key=lambda c: c["score"], reverse=True)
@@ -474,7 +476,173 @@ def _get_opponent_defence(opp_id: int, opp_name: str = "") -> int:
         pass
     return _baseline_defence(opp_name)
 
-def _next_fixture(bsd_team_id: int) -> dict:
+def _optimize_squad(pool: list[dict], budget: float) -> dict:
+    """Build a full 15-man squad from scratch out of `pool`, maximizing
+    total score under budget, position quota (2 GKP / 5 DEF / 5 MID /
+    3 FWD), and the 3-players-per-club rule.
+
+    Not a global optimum — that's an NP-hard multi-constraint knapsack
+    over 600+ real players, not worth the cost of an exact solver here.
+    Value-density greedy (score per £m) with a budget-floor reserve: before
+    taking any player, check that enough money is still left to fill every
+    remaining slot at minimum price, so the algorithm can't spend itself
+    into a corner and finish with 14 players and 2p unable to afford a GKP.
+    """
+    comp = dict(SQUAD_COMPOSITION)
+    pool_by_pos = {
+        pos: sorted([p for p in pool if p["position"] == pos], key=lambda p: p["price"])
+        for pos in comp
+    }
+
+    selected, selected_ids, team_count = [], set(), {}
+    remaining_budget = budget
+    slots_remaining = dict(comp)
+
+    def reserve_cost_for(pos: str, count: int) -> float:
+        # Sum of the `count` CHEAPEST DISTINCT available players in this
+        # position — not one player's price times count. You can only buy
+        # a given player once; the 2nd-cheapest option is never as cheap
+        # as the 1st, so multiplying under-counted the true reserve
+        # whenever 2+ slots remained in the same position.
+        available = [p["price"] for p in pool_by_pos[pos] if p["id"] not in selected_ids]
+        if len(available) < count:
+            return count * 4.0  # fallback if a position runs out of real candidates
+        return sum(available[:count])
+
+    candidates = sorted(pool, key=lambda p: p["weighted_score"] / max(p["price"], 0.1), reverse=True)
+
+    for p in candidates:
+        pos = p["position"]
+        if slots_remaining.get(pos, 0) <= 0 or p["id"] in selected_ids:
+            continue
+        tid = p.get("team_id")
+        if tid and team_count.get(tid, 0) >= 3:
+            continue
+        price = p["price"]
+        if price > remaining_budget:
+            continue
+        future_slots = dict(slots_remaining)
+        future_slots[pos] -= 1
+        reserve_needed = sum(reserve_cost_for(fp, cnt) for fp, cnt in future_slots.items() if cnt > 0)
+        if remaining_budget - price < reserve_needed - 0.01:  # small float-rounding tolerance
+            continue
+        selected.append(p); selected_ids.add(p["id"])
+        remaining_budget = round(remaining_budget - price, 1)
+        slots_remaining[pos] -= 1
+        if tid:
+            team_count[tid] = team_count.get(tid, 0) + 1
+        if all(v == 0 for v in slots_remaining.values()):
+            break
+
+    # Fallback pass: if the value-density greedy couldn't complete the
+    # squad (pool too thin/expensive for the strict reserve check above),
+    # fill whatever's left with the cheapest legal options regardless of
+    # score, so we always return a complete, valid squad rather than fail.
+    for pos, needed in list(slots_remaining.items()):
+        for p in pool_by_pos[pos]:
+            if needed <= 0:
+                break
+            if p["id"] in selected_ids:
+                continue
+            tid = p.get("team_id")
+            if tid and team_count.get(tid, 0) >= 3:
+                continue
+            if p["price"] > remaining_budget:
+                continue
+            selected.append(p); selected_ids.add(p["id"])
+            remaining_budget = round(remaining_budget - p["price"], 1)
+            if tid:
+                team_count[tid] = team_count.get(tid, 0) + 1
+            needed -= 1
+        slots_remaining[pos] = needed
+
+    total_cost  = round(sum(p["price"] for p in selected), 1)
+    total_score = round(sum(p["weighted_score"] for p in selected), 2)
+    complete    = all(v == 0 for v in slots_remaining.values())
+
+    return {
+        "squad": selected,
+        "total_cost": total_cost,
+        "budget": budget,
+        "remaining_budget": round(budget - total_cost, 1),
+        "total_score": total_score,
+        "complete": complete,
+        "unfilled_slots": {k: v for k, v in slots_remaining.items() if v > 0},
+    }
+
+
+def _next_n_fixtures(bsd_team_id: int, n: int = 5) -> dict:
+    """Like _next_fixture, but returns the next N fixtures plus an AVERAGED
+    FDR multiplier across all of them. Built for Wildcard specifically —
+    a squad optimized only for next gameweek's fixtures can look great for
+    one week and then fall apart the week after. Averaging across a real
+    multi-week horizon avoids that."""
+    cache_key = f"fpl_next_n_fix_v1__{bsd_team_id}__{n}"
+    cached = cache_read(cache_key)
+    if cached and cache_age(cached) < FDR_TTL:
+        return cached
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    fixes = []
+    pl_id = _get_pl_league_id()
+
+    param_sets = [
+        {"status": "notstarted", "limit": 25, "date_from": today},
+        {"limit": 30, "date_from": today},
+    ]
+    if pl_id is not None:
+        for p in param_sets:
+            p["league_id"] = pl_id
+
+    for params in param_sets:
+        d = bsd_get(f"/teams/{bsd_team_id}/fixtures/", params=params)
+        if d:
+            f = d if isinstance(d, list) else d.get("results", [])
+            if f:
+                pl_fixes = [x for x in f if _is_pl(x)]
+                fixes = pl_fixes
+                if fixes:
+                    break
+
+    if not fixes:
+        res: dict = {"fixtures": [], "avg_multiplier": 1.0, "count": 0}
+        cache_write(cache_key, res)
+        return res
+
+    fixes.sort(key=lambda f: f.get("event_date") or "")
+    upcoming = fixes[:n]
+
+    fixture_list = []
+    multipliers = []
+    for nf in upcoming:
+        is_home = nf.get("home_team_id") == bsd_team_id
+        opp_id  = nf.get("away_team_id" if is_home else "home_team_id") or 0
+        opp_name= nf.get("away_team" if is_home else "home_team", "Unknown")
+        opp_def = _get_opponent_defence(opp_id, opp_name)
+        fdr     = _fdr(opp_def, is_away=not is_home)
+        mult    = FDR_MULTIPLIER.get(fdr, 1.0)
+        try:
+            dt      = datetime.fromisoformat((nf.get("event_date") or "").replace("Z", "+00:00"))
+            date_str= dt.strftime("%d %b").lstrip("0")
+        except Exception:
+            date_str= (nf.get("event_date") or "")[:10]
+        fixture_list.append({
+            "opponent": opp_name, "venue": "H" if is_home else "A",
+            "date": date_str, "fdr": fdr, "fdr_label": _fdr_label(fdr),
+            "multiplier": mult,
+        })
+        multipliers.append(mult)
+
+    res = {
+        "fixtures": fixture_list,
+        "avg_multiplier": round(sum(multipliers) / len(multipliers), 3) if multipliers else 1.0,
+        "count": len(fixture_list),
+    }
+    cache_write(cache_key, res)
+    return res
+
+
+
     cache_key = f"fpl_next_fix_v1__{bsd_team_id}"
     cached = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
@@ -1038,6 +1206,26 @@ def _team_next_fixture_cached(team_id: int, teams: dict, cache: dict) -> dict:
         cache[team_id] = _next_fixture(bsd_id) if bsd_id else {}
     return cache[team_id]
 
+def _team_next_n_fixtures_cached(team_id: int, teams: dict, cache: dict, n: int = 5) -> dict:
+    if team_id not in cache:
+        bsd_id, _ = _bsd_lookup(_bsd_name(_team_name(teams, team_id)))
+        cache[team_id] = _next_n_fixtures(bsd_id, n) if bsd_id else {"fixtures": [], "avg_multiplier": 1.0, "count": 0}
+    return cache[team_id]
+
+def _score_player_multi_gw(p: dict, teams: dict, fixture_cache: dict, n_gw: int = 5) -> dict:
+    """Same idea as _score_player, but weighted against the AVERAGE
+    fixture difficulty across the next n_gw gameweeks instead of just the
+    next one. Built for Wildcard specifically — a squad optimized purely
+    for next gameweek's fixtures can look great for one week and fall
+    apart the week after, this is the fix for that."""
+    player = _build_player(p, teams)
+    nf     = _team_next_n_fixtures_cached(player["team_id"], teams, fixture_cache, n_gw)
+    avg_mult = nf.get("avg_multiplier", 1.0)
+    player["upcoming_fixtures"] = nf.get("fixtures", [])
+    player["avg_fdr_multiplier"] = avg_mult
+    player["weighted_score"] = round(player["fpl_score"] * avg_mult, 3)
+    return player
+
 def _score_player(p: dict, teams: dict, fixture_cache: dict) -> dict:
     """Build a player dict with next_fixture + weighted_score attached."""
     player = _build_player(p, teams)
@@ -1094,6 +1282,116 @@ def _best_starting_xi(squad: list[dict]) -> tuple[list[dict], list[dict], str]:
     )
     bench = ([bench_gkp] if bench_gkp else []) + bench_outfield
     return starting, bench, best_formation
+
+@router.get("/fpl/wildcard-squad")
+def wildcard_squad(
+    budget: float = Query(100.0, description="Total budget, £m (squad value + bank)", ge=60, le=120),
+    refresh: bool = Query(False, description="Skip cache and recompute fresh"),
+):
+    """Build a full 15-man squad from scratch, optimized for Wildcard.
+    Uses AVERAGED fixture difficulty across the next 5 gameweeks, not
+    just the next one, so the squad doesn't fall apart the week after
+    you play the chip."""
+    cache_key = f"fpl_wildcard_v1__{budget}"
+    cached = cache_read(cache_key)
+    if not refresh and cached and cache_age(cached) < FDR_TTL:
+        cached["cached"] = True
+        return cached
+
+    fpl     = _get_fpl_data()
+    teams   = fpl.get("teams", {})
+    players = fpl.get("players", [])
+    fixture_cache: dict = {}
+
+    pool = []
+    for p in players:
+        if p.get("minutes", 0) == 0 and p.get("total_points", 0) == 0:
+            continue  # skip players with zero involvement this season, not worth scoring
+        scored = _score_player_multi_gw(p, teams, fixture_cache, n_gw=5)
+        pool.append(scored)
+
+    result = _optimize_squad(pool, budget)
+    if not result["complete"]:
+        raise HTTPException(502, f"Could not build a complete squad within £{budget}m. "
+                                   f"Unfilled positions: {result['unfilled_slots']}")
+
+    squad = result["squad"]
+    starting, bench, formation = _best_starting_xi(squad)
+    captain = max(starting, key=lambda p: p["weighted_score"])
+
+    response = {
+        "chip": "Wildcard",
+        "horizon_gameweeks": 5,
+        "budget": budget,
+        "total_cost": result["total_cost"],
+        "remaining_budget": result["remaining_budget"],
+        "total_score": result["total_score"],
+        "formation": formation,
+        "starting_xi": starting,
+        "bench": bench,
+        "suggested_captain": captain,
+        "full_squad": squad,
+        "cached": False, "_cached_at": time.time(),
+    }
+    cache_write(cache_key, response)
+    return response
+
+
+@router.get("/fpl/freehit-squad")
+def freehit_squad(
+    budget: float = Query(100.0, description="Total budget, £m (squad value + bank)", ge=60, le=120),
+    refresh: bool = Query(False, description="Skip cache and recompute fresh"),
+):
+    """Build a full 15-man squad from scratch, optimized for Free Hit.
+    Uses NEXT GAMEWEEK ONLY fixture difficulty, deliberately different
+    from Wildcard — Free Hit reverts after one gameweek, so optimizing
+    for a 5-week horizon the way Wildcard does would give worse advice,
+    the ideal Free Hit squad is whichever one scores highest THIS week,
+    not over time."""
+    cache_key = f"fpl_freehit_v1__{budget}"
+    cached = cache_read(cache_key)
+    if not refresh and cached and cache_age(cached) < FDR_TTL:
+        cached["cached"] = True
+        return cached
+
+    fpl     = _get_fpl_data()
+    teams   = fpl.get("teams", {})
+    players = fpl.get("players", [])
+    fixture_cache: dict = {}
+
+    pool = []
+    for p in players:
+        if p.get("minutes", 0) == 0 and p.get("total_points", 0) == 0:
+            continue
+        scored = _score_player(p, teams, fixture_cache)
+        pool.append(scored)
+
+    result = _optimize_squad(pool, budget)
+    if not result["complete"]:
+        raise HTTPException(502, f"Could not build a complete squad within £{budget}m. "
+                                   f"Unfilled positions: {result['unfilled_slots']}")
+
+    squad = result["squad"]
+    starting, bench, formation = _best_starting_xi(squad)
+    captain = max(starting, key=lambda p: p["weighted_score"])
+
+    response = {
+        "chip": "Free Hit",
+        "horizon_gameweeks": 1,
+        "budget": budget,
+        "total_cost": result["total_cost"],
+        "remaining_budget": result["remaining_budget"],
+        "total_score": result["total_score"],
+        "formation": formation,
+        "starting_xi": starting,
+        "bench": bench,
+        "suggested_captain": captain,
+        "full_squad": squad,
+        "cached": False, "_cached_at": time.time(),
+    }
+    cache_write(cache_key, response)
+    return response
+
 
 @router.get("/fpl/squad")
 def squad_analysis(
