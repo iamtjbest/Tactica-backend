@@ -1283,7 +1283,56 @@ def _best_starting_xi(squad: list[dict]) -> tuple[list[dict], list[dict], str]:
     bench = ([bench_gkp] if bench_gkp else []) + bench_outfield
     return starting, bench, best_formation
 
-@router.get("/fpl/wildcard-squad")
+@router.get("/fpl/debug-fixture-lookup")
+def debug_fixture_lookup(team: str = Query(..., description="Team name, e.g. Liverpool")):
+    """Diagnose why /fpl/captain and others are returning an empty
+    next_fixture universally. Shows the resolved PL league_id, the RAW
+    unfiltered fixture list BSD returns for this team, and which of
+    those fixtures pass the _is_pl() filter."""
+    pl_id = _get_pl_league_id()
+    fpl   = _get_fpl_data()
+    teams = fpl.get("teams", {})
+    team_id = None
+    for tid, tname in teams.items():
+        if tname.lower() == team.lower():
+            team_id = tid
+            break
+    if team_id is None:
+        raise HTTPException(404, f"'{team}' not found among FPL teams.")
+
+    bsd_id, bsd_name = _bsd_lookup(_bsd_name(_team_name(teams, team_id)))
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    param_sets = [
+        {"status": "notstarted", "limit": 15, "date_from": today},
+        {"limit": 20, "date_from": today},
+    ]
+    if pl_id is not None:
+        for p in param_sets:
+            p["league_id"] = pl_id
+
+    raw_results = []
+    for params in param_sets:
+        d = bsd_get(f"/teams/{bsd_id}/fixtures/", params=params) if bsd_id else None
+        f = d if isinstance(d, list) else (d.get("results", []) if d else [])
+        raw_results.append({
+            "params_used": params,
+            "raw_fixture_count": len(f),
+            "raw_fixtures_sample": f[:5],
+            "passed_is_pl_filter": [x for x in f if _is_pl(x)][:5],
+        })
+
+    return {
+        "team": team,
+        "fpl_team_id": team_id,
+        "bsd_team_id": bsd_id,
+        "bsd_team_name": bsd_name,
+        "resolved_pl_league_id": pl_id,
+        "attempts": raw_results,
+    }
+
+
+
 def wildcard_squad(
     budget: float = Query(100.0, description="Total budget, £m (squad value + bank)", ge=60, le=120),
     refresh: bool = Query(False, description="Skip cache and recompute fresh"),
