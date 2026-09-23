@@ -642,7 +642,7 @@ def _next_n_fixtures(bsd_team_id: int, n: int = 5) -> dict:
     return res
 
 
-
+def _next_fixture(bsd_team_id: int) -> dict:
     cache_key = f"fpl_next_fix_v1__{bsd_team_id}"
     cached = cache_read(cache_key)
     if cached and cache_age(cached) < FDR_TTL:
