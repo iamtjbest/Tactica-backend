@@ -443,8 +443,21 @@ def nations_debug(nation_id: int):
     scored = [{"name": p.get("name"), "pos": p.get("position"), "score": score_player(p, p.get("position") in ("FW","MF")),
                "club_country": p.get("club_country"), "league_weight": league_weight(p.get("club_country", ""))}
               for p in players_raw[:5]]
+
+    # Additional test, doesn't affect the response above: does a generic,
+    # non-tournament squad endpoint exist for national teams? Some UEFA
+    # Nations League countries (Wales, Italy) never qualified for the
+    # World Cup, so /worldcup/squads/ has nothing for them regardless of
+    # anything in our own code — checking if an alternative source exists.
+    generic_raw = bsd_get("/players/", params={"team_id": bsd_id, "limit": 100})
+    generic_players = (generic_raw.get("results") or []) if isinstance(generic_raw, dict) else []
+
     return {"nation_id": nation_id, "bsd_team_id": bsd_id, "bsd_team_name": bsd_name,
-            "first_player_raw": first, "first_5_scored": scored}
+            "first_player_raw": first, "first_5_scored": scored,
+            "worldcup_squad_player_count": len(players_raw),
+            "generic_players_endpoint_present": generic_raw is not None,
+            "generic_players_endpoint_count": len(generic_players),
+            "generic_players_first": generic_players[0] if generic_players else None}
 
 
 # ── GET /api/nations/debug-fixtures/{id} — testing for a better squad source ──
