@@ -564,8 +564,20 @@ def nations_predict(body: dict):
     my_att,  my_def,  my_count,  my_bsd  = get_ratings(my_nation)
     opp_att, opp_def, opp_count, opp_bsd = get_ratings(opp_nation)
 
-    all_formations = score_all_formations(my_att, my_def, opp_att, opp_def)
-    best = all_formations[0]
+    # If either side had no real squad data, don't compute a win
+    # probability from the 70/70 placeholder at all — a percentage next
+    # to a buried warning still reads as a real number to anyone who
+    # doesn't scroll to the warnings list. Make it impossible to miss
+    # instead: no probability, no formation, just the plain fact that
+    # this matchup can't be rated right now.
+    data_reliable = my_count > 0 and opp_count > 0
+    if data_reliable:
+        all_formations = score_all_formations(my_att, my_def, opp_att, opp_def)
+        best = all_formations[0]
+        best_formation, probability = best["formation"], best["probability"]
+    else:
+        all_formations = []
+        best_formation, probability = None, None
 
     resp = {
         "team":           my_nation["name"],
@@ -574,9 +586,10 @@ def nations_predict(body: dict):
         "my_defence":     my_def,
         "opp_attack":     opp_att,
         "opp_defence":    opp_def,
-        "best_formation": best["formation"],
-        "probability":    best["probability"],
+        "best_formation": best_formation,
+        "probability":    probability,
         "all_formations": all_formations,
+        "reliable":       data_reliable,
         "my_squad_count":  my_count,
         "opp_squad_count": opp_count,
         "players_scored":  my_count,
