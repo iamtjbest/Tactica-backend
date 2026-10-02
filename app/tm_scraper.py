@@ -227,37 +227,285 @@ def _resolve_specific_pos(tm_position: str) -> str:
     return "CM"
 
 
+# ── Position detection helpers ──────────────────────────────────────────────
+
+_POS_KEYWORDS = [
+    "back", "forward", "midfield", "winger", "goalkeeper",
+    "striker", "keeper",
+]
+
+# TM CSS classes that indicate position category (on jersey number cells)
+_CSS_POS_MAP = {
+    "torwart": "Goalkeeper",
+    "abwehr": "Centre-Back",
+    "mittelfeld": "Central Midfield",
+    "sturm": "Centre-Forward",
+}
+
+
+def _extract_position(row, cells):
+    """
+    Extract player position using multiple fallback strategies.
+    TM embeds position in different ways depending on page version.
+    """
+    # Strategy 1: CSS classes on cells (most reliable)
+    # TM uses bg_Torwart, bg_Abwehr, bg_Mittelfeld, bg_Sturm on cells
+    all_classes = []
+    for td in cells:
+        all_classes.extend(td.get("class") or [])
+    all_classes.extend(row.get("class") or [])
+    class_str = " ".join(all_classes).lower()
+
+    for css_key, pos_name in _CSS_POS_MAP.items():
+        if css_key in class_str:
+            return pos_name
+
+    # Strategy 2: Text fragments in posrela cell
+    pos_cell = row.select_one("td.posrela")
+    if pos_cell:
+        for text in pos_cell.stripped_strings:
+            text_stripped = text.strip()
+            # Exact match against known TM position labels
+            if text_stripped in _POS_MAP:
+                return text_stripped
+            # Keyword match
+            if any(kw in text_stripped.lower() for kw in _POS_KEYWORDS):
+                return text_stripped
+
+    # Strategy 3: Any cell containing exact position text (not in links)
+    for td in cells:
+        if td.select_one("a[href*='/profil/']") or td.select_one("a[href*='/verein/']"):
+            continue
+        for text in td.stripped_strings:
+            if text in _POS_MAP:
+                return text
+
+    # Strategy 4: <small>, <span>, or nested elements with position text
+    for td in cells:
+        for tag in td.find_all(["small", "span", "td"]):
+            text = tag.get_text(strip=True)
+            if text in _POS_MAP:
+                return text
+            if any(kw in text.lower() for kw in _POS_KEYWORDS) and len(text) < 30:
+                return text
+
+    return ""
+
+
+def _extract_age(cells):
+    """
+    Extract player age. TM shows DOB as 'Mon DD, YYYY (age)' or
+    'DD.MM.YYYY (age)' — the bare digit scan used before was catching
+    jersey numbers and caps.
+    """
+    # Strategy 1: Age in parentheses (most TM pages use this)
+    for td in cells:
+        text = td.get_text(strip=True)
+        age_match = re.search(r'\((\d{1,2})\)', text)
+        if age_match:
+            val = int(age_match.group(1))
+            if 14 <= val <= 55:
+                return val
+
+    # Strategy 2: Compute from birth year in date text
+    for td in cells:
+        text = td.get_text(strip=True)
+        # Look for year in date-like context
+        year_match = re.search(
+            r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+((?:19|20)\d{2})'
+            r'|(\d{1,2}\.\d{1,2}\.((?:19|20)\d{2}))'
+            r'|((?:19|20)\d{2})-\d{2}-\d{2}',
+            text
+        )
+        if year_match:
+            birth_year_str = next(g for g in year_match.groups() if g)
+            try:
+                birth_year = int(birth_year_str)
+                age = date.today().year - birth_year
+                if 14 <= age <= 55:
+                    return age
+            except (ValueError, TypeError):
+                pass
+
+    # Strategy 3: Bare digit, but skip first cell (jersey) and cells with links/images
+    for idx, td in enumerate(cells):
+        if idx == 0:
+            continue
+        if td.find("a") or td.find("img"):
+            continue
+        text = td.get_text(strip=True)
+        if text.isdigit():
+            val = int(text)
+            if 16 <= val <= 45:
+                return val
+
+    return 0
+
+
+def _extract_club_info(cells):
+    """Extract club name and club country from squad row."""
+    club = ""
+    club_country = ""
+
+    club_links = []
+    for td in cells:
+        for a in td.find_all("a"):
+            href = a.get("href", "")
+            if "/verein/" in href and "/profil/" not in href:
+                club_links.append(a)
+
+    if not club_links:
+        return club, club_country
+
+    # Last club link is usually the actual club
+    club_link = club_links[-1]
+    club = club_link.get("title", "") or club_link.get_text(strip=True)
+
+    # Club country: look for flag images near the club
+    parent_td = club_link.find_parent("td")
+    if parent_td:
+        # Try flaggenrahmen class first
+        flag = parent_td.find("img", class_="flaggenrahmen")
+        # Try any small flag image with a title
+        if not flag:
+            for img in parent_td.find_all("img"):
+                title = img.get("title", "")
+                # Skip if title matches club name (that's the club logo, not country flag)
+                if title and title != club and len(title) < 30:
+                    flag = img
+                    break
+        # Try adjacent cells (TM sometimes puts flag in the next cell)
+        if not flag:
+            next_td = parent_td.find_next_sibling("td")
+            if next_td:
+                flag = next_td.find("img", class_="flaggenrahmen")
+                if not flag:
+                    for img in next_td.find_all("img"):
+                        title = img.get("title", "")
+                        if title and title != club and len(title) < 30:
+                            flag = img
+                            break
+
+        if flag:
+            club_country = flag.get("title", "")
+
+    # Fallback: infer club_country from known club-to-country mappings
+    if not club_country and club:
+        club_country = _infer_club_country(club)
+
+    return club, club_country
+
+
+# Quick club→country lookup for major clubs (fallback when flag scraping fails)
+_CLUB_COUNTRY_MAP = {
+    # England
+    "Arsenal": "England", "Chelsea": "England", "Liverpool": "England",
+    "Manchester City": "England", "Manchester United": "England",
+    "Tottenham": "England", "Tottenham Hotspur": "England",
+    "Newcastle": "England", "Newcastle United": "England",
+    "Aston Villa": "England", "West Ham": "England", "West Ham United": "England",
+    "Brighton": "England", "Crystal Palace": "England", "Brentford": "England",
+    "Brentford FC": "England", "Everton": "England", "Fulham": "England",
+    "Wolverhampton": "England", "Nottingham Forest": "England",
+    "Bournemouth": "England", "Leicester": "England", "Leicester City": "England",
+    # Spain
+    "Real Madrid": "Spain", "Barcelona": "Spain", "FC Barcelona": "Spain",
+    "Atletico Madrid": "Spain", "Atlético de Madrid": "Spain",
+    "Real Sociedad": "Spain", "Athletic Bilbao": "Spain",
+    "Real Betis": "Spain", "Villarreal": "Spain", "Sevilla": "Spain",
+    "Valencia": "Spain", "Girona": "Spain",
+    # Germany
+    "Bayern Munich": "Germany", "FC Bayern München": "Germany",
+    "Borussia Dortmund": "Germany", "RB Leipzig": "Germany",
+    "Bayer Leverkusen": "Germany", "Bayer 04 Leverkusen": "Germany",
+    "Eintracht Frankfurt": "Germany", "VfB Stuttgart": "Germany",
+    "VfL Wolfsburg": "Germany", "Borussia Mönchengladbach": "Germany",
+    "SC Freiburg": "Germany", "1.FC Nuremberg": "Germany",
+    "1.FC Nürnberg": "Germany",
+    # Italy
+    "Inter Milan": "Italy", "AC Milan": "Italy", "Juventus": "Italy",
+    "Juventus FC": "Italy", "SSC Napoli": "Italy", "AS Roma": "Italy",
+    "SS Lazio": "Italy", "Atalanta": "Italy", "Atalanta BC": "Italy",
+    "ACF Fiorentina": "Italy", "Bologna FC 1909": "Italy",
+    "Torino FC": "Italy", "Cagliari Calcio": "Italy", "Como 1907": "Italy",
+    "US Sassuolo": "Italy", "AC Monza": "Italy", "Udinese": "Italy",
+    "Hellas Verona": "Italy", "Genoa CFC": "Italy", "Empoli FC": "Italy",
+    "US Lecce": "Italy", "Parma Calcio": "Italy",
+    # France
+    "Paris Saint-Germain": "France", "PSG": "France",
+    "Olympique Marseille": "France", "AS Monaco": "France",
+    "Olympique Lyon": "France", "LOSC Lille": "France",
+    "OGC Nice": "France", "RC Lens": "France", "Stade Rennais": "France",
+    "Stade Brestois 29": "France", "Paris FC": "France",
+    # Portugal
+    "Sporting CP": "Portugal", "SL Benfica": "Portugal", "FC Porto": "Portugal",
+    "SC Braga": "Portugal",
+    # Netherlands
+    "Ajax": "Netherlands", "PSV": "Netherlands", "PSV Eindhoven": "Netherlands",
+    "Feyenoord": "Netherlands", "AZ Alkmaar": "Netherlands",
+    # Other
+    "Celtic FC": "Scotland", "Rangers FC": "Scotland",
+    "Red Bull Salzburg": "Austria", "Galatasaray": "Turkey",
+    "Fenerbahce": "Turkey", "Besiktas": "Turkey",
+}
+
+
+def _infer_club_country(club_name: str) -> str:
+    """Infer club country from club name when flag scraping fails."""
+    if not club_name:
+        return ""
+    # Exact match
+    if club_name in _CLUB_COUNTRY_MAP:
+        return _CLUB_COUNTRY_MAP[club_name]
+    # Partial match
+    club_lower = club_name.lower()
+    for known_club, country in _CLUB_COUNTRY_MAP.items():
+        if known_club.lower() in club_lower or club_lower in known_club.lower():
+            return country
+    return ""
+
+
+def _extract_caps_goals(cells, jersey: int, age: int):
+    """
+    Extract international caps and goals from the rightmost numeric cells.
+    Avoids confusion with jersey number and age by excluding known values.
+    """
+    # Collect (index, value) for all numeric cells
+    numeric_entries = []
+    for idx, td in enumerate(cells):
+        text = td.get_text(strip=True).replace("-", "0").replace(".", "")
+        if text.isdigit():
+            numeric_entries.append((idx, int(text)))
+
+    # Filter out jersey (first cell) and known age
+    filtered = []
+    for idx, val in numeric_entries:
+        if idx == 0:
+            continue  # skip jersey cell
+        # Don't skip by value — multiple cells can have the same number
+        filtered.append((idx, val))
+
+    # Caps and goals are the LAST two numeric values (rightmost columns)
+    if len(filtered) >= 2:
+        caps = filtered[-2][1]
+        goals = filtered[-1][1]
+    elif len(filtered) == 1:
+        caps = filtered[0][1]
+        goals = 0
+    else:
+        caps = 0
+        goals = 0
+
+    return caps, goals
+
+
 # ── 1. SQUAD SCRAPER ────────────────────────────────────────────────────────
 
 def scrape_squad(nation_name: str, season: int = None) -> Optional[dict]:
     """
     Scrape the full squad roster for a national team from Transfermarkt.
 
-    Returns:
-    {
-        "team": "France",
-        "season": 2026,
-        "squad_count": 26,
-        "total_market_value": "€1.2B",
-        "players": [
-            {
-                "name": "Kylian Mbappé",
-                "tm_id": 342229,
-                "tm_slug": "kylian-mbappe",
-                "position": "FW",
-                "specific_position": "LW",
-                "tm_position": "Left Winger",
-                "age": 27,
-                "club": "Real Madrid",
-                "club_country": "Spain",
-                "market_value": "€180M",
-                "caps": 85,
-                "goals": 48,
-                "jersey_number": 10,
-            },
-            ...
-        ]
-    }
+    Returns dict with team info and player list.
     """
     if season is None:
         season = date.today().year
@@ -281,14 +529,13 @@ def scrape_squad(nation_name: str, season: int = None) -> Optional[dict]:
         return cached  # return stale cache if available
 
     players = []
-    # Transfermarkt squad table uses class "items"
     table = soup.find("table", class_="items")
     if not table:
         logger.warning(f"No squad table found for {nation_name}")
         return cached
 
     rows = table.select("tbody tr")
-    for row in rows:
+    for row_idx, row in enumerate(rows):
         # Skip separator/header rows
         if "bg_blau_20" in (row.get("class") or []):
             continue
@@ -297,8 +544,26 @@ def scrape_squad(nation_name: str, season: int = None) -> Optional[dict]:
         if len(cells) < 4:
             continue
 
+        # Debug: log first 2 rows so we can see actual HTML structure
+        if row_idx < 2:
+            logger.info(f"[TM DEBUG] {nation_name} row {row_idx}: {len(cells)} cells")
+            logger.info(f"[TM DEBUG] Row classes: {row.get('class')}")
+            for ci, c in enumerate(cells):
+                cls = c.get("class", [])
+                txt = c.get_text(strip=True)[:80]
+                logger.info(f"[TM DEBUG]   Cell {ci}: classes={cls} text='{txt}'")
+
         player = _parse_squad_row(cells, row)
         if player:
+            # Log first player's extracted data
+            if row_idx < 2:
+                logger.info(
+                    f"[TM DEBUG] Parsed: {player['name']} | "
+                    f"pos={player['tm_position']}→{player['position']} | "
+                    f"age={player['age']} | club={player['club']} | "
+                    f"country={player['club_country']} | "
+                    f"caps={player['caps']} goals={player['goals']}"
+                )
             players.append(player)
 
     result = {
@@ -318,29 +583,28 @@ def _parse_squad_row(cells, row) -> Optional[dict]:
     try:
         # Jersey number: first cell
         jersey = 0
-        jersey_cell = cells[0]
-        jersey_text = jersey_cell.get_text(strip=True)
+        jersey_text = cells[0].get_text(strip=True)
         if jersey_text.isdigit():
             jersey = int(jersey_text)
 
-        # Player name + link: typically in the second or third cell
-        # Look for the main player link
-        player_link = row.select_one("a.spielprofil_tooltip") or row.select_one("td.hauptlink a")
+        # Player name + link
+        player_link = (
+            row.select_one("a.spielprofil_tooltip")
+            or row.select_one("td.hauptlink a")
+        )
         if not player_link:
-            # Fallback: find any link that goes to a player profile
             for a in row.find_all("a"):
                 href = a.get("href", "")
                 if "/profil/spieler/" in href:
                     player_link = a
                     break
-
         if not player_link:
             return None
 
         name = player_link.get_text(strip=True)
         href = player_link.get("href", "")
 
-        # Extract TM player ID from href like /player-slug/profil/spieler/12345
+        # Extract TM player ID + slug
         tm_player_id = 0
         tm_player_slug = ""
         match = re.search(r"/profil/spieler/(\d+)", href)
@@ -350,76 +614,23 @@ def _parse_squad_row(cells, row) -> Optional[dict]:
         if slug_match:
             tm_player_slug = slug_match.group(1)
 
-        # Position: look for the position text (usually in a cell with class "posrela" or nearby)
-        tm_position = ""
-        pos_cell = row.select_one("td.posrela")
-        if pos_cell:
-            pos_text = pos_cell.find("tr", class_="")
-            if pos_text:
-                tm_position = pos_text.get_text(strip=True)
-        if not tm_position:
-            # Alternative: look for position in small text
-            for td in cells:
-                small = td.find("small")
-                if small:
-                    text = small.get_text(strip=True)
-                    if any(pos_word in text for pos_word in
-                           ["Back", "Forward", "Midfield", "Winger", "Goalkeeper", "Striker"]):
-                        tm_position = text
-                        break
+        # Position (multi-strategy)
+        tm_position = _extract_position(row, cells)
 
-        # Age
-        age = 0
-        for td in cells:
-            text = td.get_text(strip=True)
-            if text.isdigit() and 15 < int(text) < 50:
-                age = int(text)
-                break
+        # Age (DOB-aware)
+        age = _extract_age(cells)
 
-        # Club: look for club link
-        club = ""
-        club_country = ""
-        club_links = []
-        for td in cells:
-            for a in td.find_all("a"):
-                href = a.get("href", "")
-                if "/verein/" in href and "/profil/" not in href:
-                    club_links.append(a)
+        # Club + country
+        club, club_country = _extract_club_info(cells)
 
-        if club_links:
-            # Last club link is usually the actual club (not national team)
-            club = club_links[-1].get("title", "") or club_links[-1].get_text(strip=True)
-            # Club country flag is usually an img near the club cell
-            parent_td = club_links[-1].find_parent("td")
-            if parent_td:
-                flag = parent_td.find("img", class_="flaggenrahmen")
-                if flag:
-                    club_country = flag.get("title", "")
-
-        # Market value: look for "rechts hauptlink" cell
+        # Market value
         market_value = ""
         mv_cell = row.select_one("td.rechts.hauptlink")
         if mv_cell:
             market_value = mv_cell.get_text(strip=True)
 
-        # Caps and goals: typically in the last few cells
-        caps = 0
-        goals = 0
-        # Caps/goals cells are usually the rightmost numeric cells
-        numeric_cells = []
-        for td in cells:
-            text = td.get_text(strip=True).replace("-", "0")
-            if text.isdigit():
-                numeric_cells.append(int(text))
-
-        # In the extended squad view (+1), caps and goals are typically
-        # the last two numeric columns before market value
-        if len(numeric_cells) >= 3:
-            # Pattern: jersey, age, caps, goals (sometimes more)
-            # The first is jersey, second is usually age
-            # Then caps and goals
-            caps = numeric_cells[-2] if len(numeric_cells) >= 2 else 0
-            goals = numeric_cells[-1] if len(numeric_cells) >= 1 else 0
+        # Caps and goals
+        caps, goals = _extract_caps_goals(cells, jersey, age)
 
         return {
             "name": name,
@@ -538,10 +749,17 @@ def scrape_player_stats(
 
 
 def _parse_stats_footer(cells: list, stats: dict) -> dict:
-    """Parse the tfoot summary row of a Transfermarkt stats table."""
-    # Typical column order in the detailed stats view:
-    # Competition, Apps, Goals, Assists, Yellow, 2nd Yellow, Red, Minutes
-    # But the exact order varies; we parse by position
+    """
+    Parse the tfoot summary row of a Transfermarkt stats table.
+
+    The footer in the plus/1 (extended) view typically has:
+    [empty/label, Apps, Goals, Assists, Yellow, 2ndYellow, Red, SubOn, SubOff, Minutes]
+
+    We extract all non-None numerics and use position logic:
+    - First value (< 100) = appearances
+    - Last value (usually the largest) = minutes
+    - After appearances: goals, assists, yellows (in order)
+    """
     numerics = []
     for cell in cells:
         text = cell.get_text(strip=True).replace(".", "").replace("'", "").replace("-", "0")
@@ -550,26 +768,45 @@ def _parse_stats_footer(cells: list, stats: dict) -> dict:
         else:
             numerics.append(None)
 
-    # Try to map known patterns
-    # In the extended view, common patterns are:
-    # [apps, goals, assists, yellows, second_yellows, reds, subs_on, subs_off, minutes]
-    if len(numerics) >= 3:
-        vals = [n for n in numerics if n is not None]
-        if len(vals) >= 2:
-            stats["appearances"] = vals[0] if vals[0] and vals[0] < 100 else 0
-            stats["goals"] = vals[1] if len(vals) > 1 else 0
-            stats["assists"] = vals[2] if len(vals) > 2 else 0
-            if len(vals) > 3:
-                stats["yellow_cards"] = vals[3]
-            # Minutes is typically the last number (often large, 1000+)
-            if vals and vals[-1] > 100:
-                stats["minutes"] = vals[-1]
+    vals = [n for n in numerics if n is not None]
+    if len(vals) < 2:
+        return stats
+
+    # Minutes is the last value (typically > 100 for any player with apps)
+    if vals[-1] > 80:
+        stats["minutes"] = vals[-1]
+        vals = vals[:-1]  # remove minutes from the list
+
+    # First value = appearances
+    if vals and vals[0] < 100:
+        stats["appearances"] = vals[0]
+
+    # Remaining values: goals, assists, yellows (in that order)
+    if len(vals) > 1:
+        stats["goals"] = vals[1]
+    if len(vals) > 2:
+        stats["assists"] = vals[2]
+    if len(vals) > 3:
+        stats["yellow_cards"] = vals[3]
+    # 2nd yellow at index 4, red at index 5 — less important but let's capture reds
+    if len(vals) > 5:
+        stats["red_cards"] = vals[5]
 
     return stats
 
 
 def _aggregate_match_stats(rows: list, stats: dict) -> dict:
-    """Aggregate stats from individual match rows."""
+    """
+    Aggregate stats from individual match rows in the TM performance table.
+
+    TM's detailed stats table (leistungsdaten, plus/1 view) has columns:
+    [Competition, Matchday, Date, Venue, Opponent, Result, Pos, Goals, Assists,
+     Yellow, 2ndYellow, Red, SubOn, SubOff, Minutes]
+
+    The exact column count and order can vary, so we parse each row by
+    identifying the numeric values and their positions relative to the end
+    of the row (goals/assists/cards/minutes are always the rightmost columns).
+    """
     total_goals = 0
     total_assists = 0
     total_minutes = 0
@@ -579,18 +816,45 @@ def _aggregate_match_stats(rows: list, stats: dict) -> dict:
 
     for row in rows:
         cells = row.find_all("td")
-        if len(cells) < 4:
+        if len(cells) < 6:
             continue
+
+        # Skip rows that are separators (e.g. competition headers)
+        row_classes = row.get("class") or []
+        if "bg_blau_20" in row_classes or "extrarow" in row_classes:
+            continue
+
         total_apps += 1
 
-        for cell in cells:
-            text = cell.get_text(strip=True)
-            # Goals cell often has a football icon or specific class
-            # Minutes cell is usually the last numeric one
-            if text.replace("'", "").isdigit():
-                val = int(text.replace("'", ""))
-                if val > 100:  # likely minutes
-                    total_minutes += val
+        # Parse the rightmost numeric cells.
+        # TM's column layout (from right to left): Minutes, SubOff, SubOn,
+        # Red, 2ndYellow, Yellow, Assists, Goals, Pos, Result, ...
+        # We grab all numeric values from the right side.
+        numerics_from_right = []
+        for cell in reversed(cells):
+            text = (cell.get_text(strip=True)
+                    .replace("'", "")   # minutes often have tick mark
+                    .replace(".", "")   # thousands separator
+                    .replace("-", "0")) # dash = 0
+            if text.isdigit():
+                numerics_from_right.append(int(text))
+            elif numerics_from_right:
+                # Stop once we hit a non-numeric cell after finding numbers
+                break
+
+        # numerics_from_right is [minutes, subOff, subOn, red, 2ndYellow, yellow, assists, goals]
+        # (reading from right to left in the table)
+        if len(numerics_from_right) >= 1:
+            # Last column is minutes (usually the largest number)
+            total_minutes += numerics_from_right[0]
+        if len(numerics_from_right) >= 7:
+            total_assists += numerics_from_right[6]
+        if len(numerics_from_right) >= 8:
+            total_goals += numerics_from_right[7]
+        if len(numerics_from_right) >= 6:
+            total_yellows += numerics_from_right[5]
+        if len(numerics_from_right) >= 4:
+            total_reds += numerics_from_right[3]
 
     stats["appearances"] = total_apps
     stats["goals"] = total_goals
