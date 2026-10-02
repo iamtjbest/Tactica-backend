@@ -361,6 +361,51 @@ def _weighted_avg(pairs: list[tuple[float, float]]) -> float:
     return sum(v * w for v, w in pairs) / total_w
 
 
+def _estimate_club_form(player: dict, bucket: str) -> float:
+    """
+    Estimate club form when per-player season stats aren't available.
+
+    Uses three signals already in the squad data:
+      50% market value  — higher value = better current club-level output
+      25% age curve     — prime-age players (25-29) assumed in peak form
+      25% intl activity — recent caps + goals = likely playing regularly at club
+
+    Produces scores in the 35-90 range so different players separate properly.
+    """
+    # ── Market value component (0-100) ──
+    mv_str = player.get("market_value", "")
+    mv_score = _parse_market_value_score(mv_str)  # reuse existing function
+
+    # ── Age curve component (0-100) ──
+    age = player.get("age", 27) or 27
+    if 25 <= age <= 29:
+        age_score = 85.0          # prime
+    elif 23 <= age <= 31:
+        age_score = 72.0          # near-prime
+    elif 21 <= age <= 33:
+        age_score = 58.0          # developing / experienced
+    elif age < 21:
+        age_score = 45.0          # very young prospect
+    else:
+        age_score = 40.0          # veteran, declining physically
+
+    # ── International activity component (0-100) ──
+    caps = player.get("caps", 0) or 0
+    intl_goals = player.get("goals", 0) or 0
+    # Being called up regularly = coach trusts your club form
+    caps_signal = min(100, (caps / 60) * 100)       # 60+ caps = 100
+    goals_signal = min(100, (intl_goals / 20) * 100)  # 20+ goals = 100
+
+    if bucket in ("FW", "MF"):
+        intl_activity = 0.50 * caps_signal + 0.50 * goals_signal
+    else:
+        # DF/GK: caps matter more, goals less relevant
+        intl_activity = 0.80 * caps_signal + 0.20 * goals_signal
+
+    estimated = 0.50 * mv_score + 0.25 * age_score + 0.25 * intl_activity
+    return max(35, min(90, estimated))  # clamp to reasonable range
+
+
 def _score_club_form(player: dict, stats: dict, bucket: str) -> float:
     """
     Score club form (0-100) based on raw season stats.
@@ -383,6 +428,10 @@ def _score_club_form(player: dict, stats: dict, bucket: str) -> float:
         goals = player.get("goals", 0) or player.get("G", 0) or 0
     if assists == 0:
         assists = player.get("assists", 0) or player.get("A", 0) or 0
+
+    # ── FALLBACK: no club stats available at all → estimate from squad data ──
+    if minutes == 0 and apps == 0:
+        return _estimate_club_form(player, bucket)
 
     # Minutes share: how much they've played (fitness/form proxy)
     # A player with 2000+ mins is fully match-fit
