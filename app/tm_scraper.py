@@ -23,6 +23,7 @@ import time
 import logging
 from datetime import datetime, date
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -42,6 +43,11 @@ TM_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+# ScraperAPI — free tier: 5,000 reqs/month, no card required
+# Set SCRAPERAPI_KEY env var on Render to enable proxied scraping
+SCRAPERAPI_KEY = os.environ.get("SCRAPERAPI_KEY", "")
+SCRAPERAPI_URL = "https://api.scraperapi.com"
 
 # Cache TTLs
 SQUAD_TTL = 86400       # 24 hours — squads don't change mid-window
@@ -156,6 +162,8 @@ TM_TEAM_IDS: dict[str, dict] = {
 def _tm_get(path: str) -> Optional[BeautifulSoup]:
     """
     Fetch a Transfermarkt page with rate limiting.
+    Routes through ScraperAPI when SCRAPERAPI_KEY is set (needed on
+    cloud hosts like Render where TM blocks datacenter IPs).
     Returns a BeautifulSoup object or None on error.
     """
     global _last_request_time
@@ -165,18 +173,31 @@ def _tm_get(path: str) -> Optional[BeautifulSoup]:
     if elapsed < REQUEST_DELAY:
         time.sleep(REQUEST_DELAY - elapsed)
 
-    url = f"{TM_BASE}{path}"
+    target_url = f"{TM_BASE}{path}"
+
     try:
-        resp = requests.get(url, headers=TM_HEADERS, timeout=15)
+        if SCRAPERAPI_KEY:
+            # Route through ScraperAPI proxy
+            proxy_url = (
+                f"{SCRAPERAPI_URL}"
+                f"?api_key={SCRAPERAPI_KEY}"
+                f"&url={quote(target_url, safe='')}"
+            )
+            resp = requests.get(proxy_url, timeout=30)
+            logger.info(f"TM via ScraperAPI: {resp.status_code} for {path}")
+        else:
+            # Direct request (works locally, blocked on cloud)
+            resp = requests.get(target_url, headers=TM_HEADERS, timeout=15)
+
         _last_request_time = time.time()
 
         if resp.status_code == 200:
             return BeautifulSoup(resp.text, "lxml")
         elif resp.status_code == 404:
-            logger.warning(f"TM 404: {url}")
+            logger.warning(f"TM 404: {target_url}")
             return None
         else:
-            logger.warning(f"TM {resp.status_code}: {url}")
+            logger.warning(f"TM {resp.status_code}: {target_url}")
             return None
     except Exception as e:
         logger.error(f"TM request error: {e}")
