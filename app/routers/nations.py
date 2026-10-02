@@ -27,9 +27,12 @@ ROOT CAUSE OF FLAT 50/52 RATINGS (now fixed):
 """
 
 import time
+import logging
 from datetime import date
 from fastapi import APIRouter, Query, Path, HTTPException
 from app.config import bsd_get, bsd_find_team, cache_read, cache_write, cache_age
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -726,4 +729,219 @@ def nations_lineup(body: dict):
         "count":       len(formatted),
         "squad_size":  data["squad_count"],
         "bsd_resolved": bsd_name or None,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW: Transfermarkt-powered endpoints (v4)
+# These replace BSD for national team data. The old BSD endpoints above
+# stay intact so nothing breaks — the frontend can switch over when ready.
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/nations/v4/squad/{nation_name}")
+def v4_squad(nation_name: str = Path(..., description="Nation name e.g. France")):
+    """
+    Fetch squad from Transfermarkt + rate each player with the new formula.
+
+    60% club form + 25% international track record + 15% squad quality baseline
+    """
+    from app.tm_scraper import scrape_squad
+    from app.xi_predictor import rate_xi
+
+    # Resolve name from our registry (supports aliases)
+    nation = _BY_NAME.get(nation_name)
+    if not nation:
+        # Try case-insensitive
+        for n in WC_NATIONS:
+            if n["name"].lower() == nation_name.lower():
+                nation = n
+                break
+            for alias in n.get("bsd_names", []):
+                if alias.lower() == nation_name.lower():
+                    nation = n
+                    break
+    if not nation:
+        raise HTTPException(status_code=404, detail=f"'{nation_name}' not in registry.")
+
+    squad_data = scrape_squad(nation["name"])
+    if not squad_data or not squad_data.get("players"):
+        raise HTTPException(status_code=404,
+            detail=f"No Transfermarkt squad data for '{nation['name']}'. "
+                   f"Check TM_TEAM_IDS mapping or try a different season.")
+
+    # Rate the full squad
+    ratings = rate_xi(squad_data["players"], nation_name=nation["name"])
+
+    return {
+        "team": nation["name"],
+        "source": "transfermarkt",
+        "squad_count": squad_data["squad_count"],
+        "attack": ratings["attack"],
+        "defence": ratings["defence"],
+        "xi_quality": ratings["xi_quality"],
+        "player_ratings": ratings["player_ratings"],
+        "squad": squad_data["players"],
+    }
+
+
+@router.post("/nations/v4/predict")
+def v4_predict(body: dict):
+    """
+    XI-specific prediction using Transfermarkt data.
+
+    Predicts the most likely starting XI for each team,
+    rates THAT SPECIFIC XI (not just the squad average),
+    then runs formation analysis.
+
+    Body: { team_name, opp_name, formation? }
+    """
+    from app.tm_scraper import scrape_squad, scrape_match_lineups
+    from app.xi_predictor import predict_and_rate
+    from app.ml_model import score_all_formations
+
+    team_name = body.get("team_name", "")
+    opp_name  = body.get("opp_name", "")
+    formation = body.get("formation")
+
+    if not team_name or not opp_name:
+        raise HTTPException(status_code=400, detail="team_name and opp_name required.")
+
+    # Resolve from registry
+    my_nation  = _BY_NAME.get(team_name)
+    opp_nation = _BY_NAME.get(opp_name)
+
+    if not my_nation:
+        for n in WC_NATIONS:
+            if n["name"].lower() == team_name.lower():
+                my_nation = n; break
+            for a in n.get("bsd_names", []):
+                if a.lower() == team_name.lower():
+                    my_nation = n; break
+    if not opp_nation:
+        for n in WC_NATIONS:
+            if n["name"].lower() == opp_name.lower():
+                opp_nation = n; break
+            for a in n.get("bsd_names", []):
+                if a.lower() == opp_name.lower():
+                    opp_nation = n; break
+
+    if not my_nation:
+        raise HTTPException(status_code=404, detail=f"'{team_name}' not in registry.")
+    if not opp_nation:
+        raise HTTPException(status_code=404, detail=f"'{opp_name}' not in registry.")
+
+    warnings = []
+
+    def get_xi_ratings(nation, side_label):
+        """Scrape TM data → predict XI → rate that XI."""
+        squad_data  = scrape_squad(nation["name"])
+        lineup_data = scrape_match_lineups(nation["name"])
+
+        if not squad_data or not squad_data.get("players"):
+            warnings.append(f"No TM squad data for {nation['name']}. Using 65/65 fallback.")
+            return 65.0, 65.0, [], []
+
+        result = predict_and_rate(
+            squad_data=squad_data,
+            lineup_data=lineup_data,
+            formation=formation or "4-3-3",
+            nation_name=nation["name"],
+        )
+        return (
+            result["attack"],
+            result["defence"],
+            result["predicted_xi"],
+            result["player_ratings"],
+        )
+
+    my_att,  my_def,  my_xi,  my_ratings  = get_xi_ratings(my_nation,  "team")
+    opp_att, opp_def, opp_xi, opp_ratings = get_xi_ratings(opp_nation, "opponent")
+
+    # Formation analysis
+    data_reliable = len(my_xi) > 0 and len(opp_xi) > 0
+    if data_reliable:
+        all_formations = score_all_formations(my_att, my_def, opp_att, opp_def)
+        best = all_formations[0]
+        best_formation = best["formation"]
+        probability    = best["probability"]
+    else:
+        all_formations = []
+        best_formation = None
+        probability    = None
+
+    resp = {
+        "source":          "transfermarkt",
+        "team":            my_nation["name"],
+        "opponent":        opp_nation["name"],
+        "my_attack":       round(my_att, 1),
+        "my_defence":      round(my_def, 1),
+        "opp_attack":      round(opp_att, 1),
+        "opp_defence":     round(opp_def, 1),
+        "best_formation":  best_formation,
+        "probability":     probability,
+        "all_formations":  all_formations,
+        "reliable":        data_reliable,
+        # XI-specific data (the whole point)
+        "my_predicted_xi":  my_xi,
+        "opp_predicted_xi": opp_xi,
+        "my_player_ratings":  my_ratings,
+        "opp_player_ratings": opp_ratings,
+    }
+    if warnings:
+        resp["warnings"] = warnings
+    return resp
+
+
+@router.post("/nations/v4/lineup")
+def v4_lineup(body: dict):
+    """
+    Predict the most likely Starting XI using Transfermarkt data +
+    historical lineup patterns.
+
+    Body: { nation_name, formation? }
+
+    Returns the predicted XI with per-player ratings and team ATK/DEF
+    specific to this lineup.
+    """
+    from app.tm_scraper import scrape_squad, scrape_match_lineups
+    from app.xi_predictor import predict_and_rate
+
+    nation_name = body.get("nation_name", "")
+    formation   = body.get("formation", "4-3-3")
+
+    nation = _BY_NAME.get(nation_name)
+    if not nation:
+        for n in WC_NATIONS:
+            if n["name"].lower() == nation_name.lower():
+                nation = n; break
+            for a in n.get("bsd_names", []):
+                if a.lower() == nation_name.lower():
+                    nation = n; break
+    if not nation:
+        raise HTTPException(status_code=404, detail=f"'{nation_name}' not in registry.")
+
+    squad_data  = scrape_squad(nation["name"])
+    lineup_data = scrape_match_lineups(nation["name"])
+
+    if not squad_data or not squad_data.get("players"):
+        raise HTTPException(status_code=404,
+            detail=f"No Transfermarkt squad data for '{nation['name']}'.")
+
+    result = predict_and_rate(
+        squad_data=squad_data,
+        lineup_data=lineup_data,
+        formation=formation,
+        nation_name=nation["name"],
+    )
+
+    return {
+        "source":     "transfermarkt",
+        "nation":     nation["name"],
+        "formation":  result["formation"],
+        "attack":     result["attack"],
+        "defence":    result["defence"],
+        "xi_quality": result["xi_quality"],
+        "xi":         result["predicted_xi"],
+        "player_ratings": result["player_ratings"],
+        "squad_size": len(squad_data.get("players", [])),
     }
