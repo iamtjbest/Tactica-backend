@@ -839,7 +839,7 @@ def v4_predict(body: dict):
 
         if not squad_data or not squad_data.get("players"):
             warnings.append(f"No TM squad data for {nation['name']}. Using 65/65 fallback.")
-            return 65.0, 65.0, [], []
+            return 65.0, 65.0, [], [], 0
 
         result = predict_and_rate(
             squad_data=squad_data,
@@ -852,10 +852,11 @@ def v4_predict(body: dict):
             result["defence"],
             result["predicted_xi"],
             result["player_ratings"],
+            len(squad_data.get("players", [])),
         )
 
-    my_att,  my_def,  my_xi,  my_ratings  = get_xi_ratings(my_nation,  "team")
-    opp_att, opp_def, opp_xi, opp_ratings = get_xi_ratings(opp_nation, "opponent")
+    my_att,  my_def,  my_xi,  my_ratings,  my_count  = get_xi_ratings(my_nation,  "team")
+    opp_att, opp_def, opp_xi, opp_ratings, opp_count = get_xi_ratings(opp_nation, "opponent")
 
     # Formation analysis
     data_reliable = len(my_xi) > 0 and len(opp_xi) > 0
@@ -881,7 +882,11 @@ def v4_predict(body: dict):
         "probability":     probability,
         "all_formations":  all_formations,
         "reliable":        data_reliable,
-        # XI-specific data (the whole point)
+        # Squad counts (needed by frontend for partial-data display)
+        "my_squad_count":  my_count,
+        "opp_squad_count": opp_count,
+        "players_scored":  my_count,
+        # XI-specific data (the whole point of v4)
         "my_predicted_xi":  my_xi,
         "opp_predicted_xi": opp_xi,
         "my_player_ratings":  my_ratings,
