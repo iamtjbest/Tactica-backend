@@ -365,45 +365,54 @@ def _estimate_club_form(player: dict, bucket: str) -> float:
     """
     Estimate club form when per-player season stats aren't available.
 
-    Uses three signals already in the squad data:
-      50% market value  — higher value = better current club-level output
-      25% age curve     — prime-age players (25-29) assumed in peak form
-      25% intl activity — recent caps + goals = likely playing regularly at club
+    Core idea: being in the national team squad IS the form signal —
+    the coach watches club football and selects based on current form.
+    So every squad member starts at a solid baseline, then caps, goals,
+    and age adjust up or down.
 
-    Produces scores in the 35-90 range so different players separate properly.
+    Market value is NOT used here — it's already in the 15% quality_floor
+    component, and a high price tag doesn't mean good current form.
+
+    Base:  58 (you're called up = decent form)
+    Caps:  up to +20 (experience / sustained trust)
+    Goals: up to +15 FW, +10 MF, +5 DF/GK (output bonus)
+    Age:   -3 to +7 (prime-age bump)
+
+    Range: ~55 (young newcomer) to ~90 (elite veteran in prime).
     """
-    # ── Market value component (0-100) ──
-    mv_str = player.get("market_value", "")
-    mv_score = _parse_market_value_score(mv_str)  # reuse existing function
+    base = 58.0  # in the squad = coach trusts your club form
 
-    # ── Age curve component (0-100) ──
+    # ── Caps bonus (0 to +20) ──
+    caps = player.get("caps", 0) or 0
+    caps_bonus = min(20, (caps / 80) * 20)  # 80+ caps = full +20
+
+    # ── Goals bonus (position-dependent) ──
+    intl_goals = player.get("goals", 0) or 0
+    if bucket == "FW":
+        # Forwards: goals are their job, up to +15
+        goals_bonus = min(15, (intl_goals / 30) * 15)   # 30+ goals = full +15
+    elif bucket == "MF":
+        # Midfielders: goals matter but less, up to +10
+        goals_bonus = min(10, (intl_goals / 15) * 10)   # 15+ goals = full +10
+    else:
+        # DF/GK: small bonus for scoring, up to +5
+        goals_bonus = min(5, (intl_goals / 5) * 5)      # 5+ goals = full +5
+
+    # ── Age curve (-3 to +7) ──
     age = player.get("age", 27) or 27
     if 25 <= age <= 29:
-        age_score = 85.0          # prime
+        age_adj = 7.0            # prime years
     elif 23 <= age <= 31:
-        age_score = 72.0          # near-prime
+        age_adj = 4.0            # near-prime
     elif 21 <= age <= 33:
-        age_score = 58.0          # developing / experienced
+        age_adj = 1.0            # developing / still strong
     elif age < 21:
-        age_score = 45.0          # very young prospect
+        age_adj = 0.0            # very young — neutral (being called up IS the signal)
     else:
-        age_score = 40.0          # veteran, declining physically
+        age_adj = -3.0           # 34+, physical decline
 
-    # ── International activity component (0-100) ──
-    caps = player.get("caps", 0) or 0
-    intl_goals = player.get("goals", 0) or 0
-    # Being called up regularly = coach trusts your club form
-    caps_signal = min(100, (caps / 60) * 100)       # 60+ caps = 100
-    goals_signal = min(100, (intl_goals / 20) * 100)  # 20+ goals = 100
-
-    if bucket in ("FW", "MF"):
-        intl_activity = 0.50 * caps_signal + 0.50 * goals_signal
-    else:
-        # DF/GK: caps matter more, goals less relevant
-        intl_activity = 0.80 * caps_signal + 0.20 * goals_signal
-
-    estimated = 0.50 * mv_score + 0.25 * age_score + 0.25 * intl_activity
-    return max(35, min(90, estimated))  # clamp to reasonable range
+    estimated = base + caps_bonus + goals_bonus + age_adj
+    return max(50, min(90, estimated))  # squad member shouldn't be below 50
 
 
 def _score_club_form(player: dict, stats: dict, bucket: str) -> float:
