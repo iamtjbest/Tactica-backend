@@ -956,3 +956,12 @@ def v4_lineup(body: dict):
         "player_ratings": result["player_ratings"],
         "squad_size": len(squad_data.get("players", [])),
     }
+
+
+# ── Cache management ───────────────────────────────────────────────
+@router.delete("/nations/v4/clear-cache")
+def v4_clear_cache():
+    """Wipe all Transfermarkt cache entries so fresh data is scraped."""
+    from app.config import clear_cache
+    deleted = clear_cache("tm_")          # tm_squad__, tm_pstats__, tm_full__, tm_lineup__
+    return {"status": "ok", "files_deleted": deleted}
