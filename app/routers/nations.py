@@ -744,8 +744,11 @@ def v4_squad(nation_name: str = Path(..., description="Nation name e.g. France")
     Fetch squad from Transfermarkt + rate each player with the new formula.
 
     60% club form + 25% international track record + 15% squad quality baseline
+
+    Uses scrape_nation_full() to get per-player club stats (goals, assists,
+    minutes, clean sheets) which feed the 60% club-form component.
     """
-    from app.tm_scraper import scrape_squad
+    from app.tm_scraper import scrape_nation_full
     from app.xi_predictor import rate_xi
 
     # Resolve name from our registry (supports aliases)
@@ -763,13 +766,14 @@ def v4_squad(nation_name: str = Path(..., description="Nation name e.g. France")
     if not nation:
         raise HTTPException(status_code=404, detail=f"'{nation_name}' not in registry.")
 
-    squad_data = scrape_squad(nation["name"])
+    full_data = scrape_nation_full(nation["name"])
+    squad_data = full_data.get("squad") if full_data else None
     if not squad_data or not squad_data.get("players"):
         raise HTTPException(status_code=404,
             detail=f"No Transfermarkt squad data for '{nation['name']}'. "
                    f"Check TM_TEAM_IDS mapping or try a different season.")
 
-    # Rate the full squad
+    # Rate the full squad (players now have club_stats populated)
     ratings = rate_xi(squad_data["players"], nation_name=nation["name"])
 
     return {
@@ -795,7 +799,7 @@ def v4_predict(body: dict):
 
     Body: { team_name, opp_name, formation? }
     """
-    from app.tm_scraper import scrape_squad, scrape_match_lineups
+    from app.tm_scraper import scrape_nation_full
     from app.xi_predictor import predict_and_rate
     from app.ml_model import score_all_formations
 
@@ -833,9 +837,10 @@ def v4_predict(body: dict):
     warnings = []
 
     def get_xi_ratings(nation, side_label):
-        """Scrape TM data → predict XI → rate that XI."""
-        squad_data  = scrape_squad(nation["name"])
-        lineup_data = scrape_match_lineups(nation["name"])
+        """Scrape TM data (full: squad + club stats + lineups) → predict XI → rate."""
+        full_data = scrape_nation_full(nation["name"])
+        squad_data = full_data.get("squad") if full_data else None
+        lineup_data = full_data.get("lineups") if full_data else None
 
         if not squad_data or not squad_data.get("players"):
             warnings.append(f"No TM squad data for {nation['name']}. Using 65/65 fallback.")
@@ -908,7 +913,7 @@ def v4_lineup(body: dict):
     Returns the predicted XI with per-player ratings and team ATK/DEF
     specific to this lineup.
     """
-    from app.tm_scraper import scrape_squad, scrape_match_lineups
+    from app.tm_scraper import scrape_nation_full
     from app.xi_predictor import predict_and_rate
 
     nation_name = body.get("nation_name", "")
@@ -925,8 +930,9 @@ def v4_lineup(body: dict):
     if not nation:
         raise HTTPException(status_code=404, detail=f"'{nation_name}' not in registry.")
 
-    squad_data  = scrape_squad(nation["name"])
-    lineup_data = scrape_match_lineups(nation["name"])
+    full_data = scrape_nation_full(nation["name"])
+    squad_data = full_data.get("squad") if full_data else None
+    lineup_data = full_data.get("lineups") if full_data else None
 
     if not squad_data or not squad_data.get("players"):
         raise HTTPException(status_code=404,
