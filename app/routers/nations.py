@@ -193,6 +193,7 @@ WC_NATIONS: list[dict] = [
     {"id": 84, "name": "Slovenia",          "bsd_names": ["Slovenia", "Slovenija"],             "conf": "UEFA"},
     {"id": 85, "name": "Ukraine",           "bsd_names": ["Ukraine", "Ukraina"],                "conf": "UEFA"},
     {"id": 86, "name": "Wales",             "bsd_names": ["Wales", "Cymru"],                    "conf": "UEFA"},
+    {"id": 87, "name": "Benin",             "bsd_names": ["Benin"],                             "conf": "CAF" },
 ]
 
 _BY_ID   = {n["id"]:   n for n in WC_NATIONS}
