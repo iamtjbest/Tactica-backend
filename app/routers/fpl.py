@@ -1332,7 +1332,7 @@ def debug_fixture_lookup(team: str = Query(..., description="Team name, e.g. Liv
     }
 
 
-
+@router.get("/fpl/wildcard-squad")
 def wildcard_squad(
     budget: float = Query(100.0, description="Total budget, £m (squad value + bank)", ge=60, le=120),
     refresh: bool = Query(False, description="Skip cache and recompute fresh"),
