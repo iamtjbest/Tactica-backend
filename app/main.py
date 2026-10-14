@@ -17,10 +17,12 @@ Endpoints:
 """
 
 import os
-from fastapi import FastAPI, HTTPException, Query
+import asyncio
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import predict, lineup, chat, live, squad, form, nations, fpl
 from app.config import clear_cache
+from app.usage import log_usage
 
 app = FastAPI(
     title="Tactica AI Engine",
@@ -43,6 +45,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Usage tracking — runs after every request, logs to Firestore in the
+# background (via a thread), never touches the actual response. If
+# FIREBASE_SERVICE_ACCOUNT_JSON isn't set, log_usage no-ops silently, so
+# this is safe to deploy even before that env var exists.
+@app.middleware("http")
+async def usage_tracking_middleware(request: Request, call_next):
+    response = await call_next(request)
+    asyncio.create_task(asyncio.to_thread(
+        log_usage,
+        request.url.path,
+        request.method,
+        response.status_code,
+        request.headers.get("authorization"),
+    ))
+    return response
+
 
 app.include_router(predict.router,    prefix="/api")
 app.include_router(lineup.router,     prefix="/api")
