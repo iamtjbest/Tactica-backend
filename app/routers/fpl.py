@@ -909,7 +909,7 @@ def fixture_ticker(
     share_text = (
         f"📅 {team} Fixture Ticker via @TacticaEngine\n"
         f"Next 3: {n3s}\n{insight} — {easy} easy, {hard} hard\n"
-        f"Full list: app.tactica.com.ng/fpl #FPL #FPL2627"
+        f"Full list: app.tacticaengine.com/fpl #FPL #FPL2627"
     )
     result = {"team":team,"bsd_name":bsd_name,"fixtures":fixtures_out,
               "share_text":share_text,"cached":False,"_cached_at":time.time()}
@@ -1013,7 +1013,7 @@ def captain_pick(
         f"🎯 FPL Captain Pick: {rec['name']} ({team_name}) £{rec['price']}m\n"
         f"{rec['ppg']} pts/game last season · {rec['ownership']}% owned\n"
         f"Next: {nf.get('venue','H')} vs {nf.get('opponent','?')} (FDR {fdr})\n"
-        f"via @TacticaEngine · app.tactica.com.ng/fpl #FPL"
+        f"via @TacticaEngine · app.tacticaengine.com/fpl #FPL"
     )
     result = {
         "team": team_name, "fpl_team_id": fpl_team_id,
@@ -1091,7 +1091,7 @@ def transfer_recommender(
         f"🔄 Top FPL {pos_label} transfers via @TacticaEngine\n"
         f"Budget £{min_price}m–£{max_price}m · ranked by form + fixture value\n"
         f"{t3s}\n"
-        f"Full list: app.tactica.com.ng/fpl #FPL #FPLTransfers"
+        f"Full list: app.tacticaengine.com/fpl #FPL #FPLTransfers"
     )
     result = {
         "position": pos_upper, "min_price": min_price, "max_price": max_price,
@@ -1181,7 +1181,7 @@ def differential_finder(
         f"💡 FPL Differential {pos_label}s via @TacticaEngine\n"
         f"Under {max_ownership}% ownership · easy fixtures · in form\n\n"
         f"🔥 {t3s}\n\n"
-        f"Full list: app.tactica.com.ng/fpl #FPL #FPLDifferentials"
+        f"Full list: app.tacticaengine.com/fpl #FPL #FPLDifferentials"
     )
     result = {
         "position": pos_upper, "max_ownership": max_ownership,
@@ -1570,7 +1570,7 @@ def squad_analysis(
     if transfer_suggestions:
         t = transfer_suggestions[0]
         cap_text += f"Suggested transfer: {t['out']['name']} ➡ {t['in']['name']}\n"
-    cap_text += "via @TacticaEngine · app.tactica.com.ng/fpl #FPL #MySquad"
+    cap_text += "via @TacticaEngine · app.tacticaengine.com/fpl #FPL #MySquad"
 
     # Chip advice — GW comes from fpl["current_event"], now actually
     # populated by _get_fpl_data() (see fix above). Ranked across all
