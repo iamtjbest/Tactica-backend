@@ -34,9 +34,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://app.tactica.com.ng",      # the engine (production)
-        "https://tactica.com.ng",          # marketing site
-        "https://www.tactica.com.ng",      # marketing site (www)
+        "https://app.tacticaengine.com",   # the engine (production)
+        "https://tacticaengine.com",       # marketing site
+        "https://www.tacticaengine.com",   # marketing site (www)
         "https://tactica-backend-hdbd.onrender.com",
     ],
     # Also allow any Vercel preview deployment URL (changes every push)
