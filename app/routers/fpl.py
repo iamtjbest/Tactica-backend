@@ -48,8 +48,223 @@ def _current_gameweek() -> int:
 
 FIRST_HALF_DEADLINE_GW = 19  # one of each chip must be used by this GW or it's lost
 
+# ── Manager entry (FPL team ID) ───────────────────────────────────────────────
+# Everything below is public, no login. Three endpoints carry the lot:
+#   entry/{id}/                  profile, overall points/rank, last bank + value
+#   entry/{id}/history/          per-GW points, rank, bank, transfers, hits,
+#                                bench points, and the chips already played
+#   entry/{id}/event/{gw}/picks/ the locked 15, captain/vice, active chip
+#
+# The one thing we cannot read is a squad that hasn't locked yet. Picks for a
+# gameweek that hasn't started 404, and the live pre-deadline squad sits behind
+# my-team/{id}/ which needs a session cookie. We are not asking users for FPL
+# credentials, so the newest squad available is always the last locked one.
+
+ENTRY_BASE = "https://fantasy.premierleague.com/api"
+ENTRY_TTL  = 900    # 15 min. Nothing here changes between deadlines anyway.
+
+CHIP_LABELS = {
+    "wildcard": "Wildcard",
+    "freehit":  "Free Hit",
+    "bboost":   "Bench Boost",
+    "3xc":      "Triple Captain",
+}
+# Only used if bootstrap doesn't expose a usable chips array.
+FALLBACK_CHIPS = list(CHIP_LABELS.keys())
+
+
+def _fpl_json(path: str, timeout: int = 10):
+    """GET an FPL API path. Returns None on 404 so callers can walk
+    backwards through gameweeks instead of blowing up."""
+    try:
+        resp = requests.get(f"{ENTRY_BASE}/{path.lstrip('/')}", timeout=timeout,
+                            headers={"User-Agent": "Tactica/1.0"})
+    except Exception as e:
+        raise HTTPException(502, f"FPL API unavailable: {e}")
+    if resp.status_code == 404:
+        return None
+    if resp.status_code == 403:
+        raise HTTPException(502, "That FPL endpoint requires a logged-in session.")
+    try:
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        raise HTTPException(502, f"FPL API error on {path}: {e}")
+
+
+def _last_locked_gw() -> int:
+    """Newest gameweek whose deadline has passed, which is the newest
+    gameweek whose picks are public."""
+    fpl = _get_fpl_data()
+    now = datetime.now(timezone.utc)
+    locked = []
+    for e in fpl.get("events", []):
+        raw = e.get("deadline_time")
+        if not raw:
+            continue
+        try:
+            when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if when <= now and e.get("id"):
+            locked.append(e["id"])
+    return max(locked) if locked else max(0, fpl.get("current_event", 0))
+
+
+def _chips_state(chips_played: list, current_gw: int) -> dict:
+    """What the manager actually has left.
+
+    FPL only tells us which chips were USED (name + gameweek), so
+    remaining is entitlement minus played. Entitlement comes from
+    bootstrap's chips array when it's there, falling back to the four
+    standard chips. Each is granted twice a season, once per half, and
+    the first-half copy is lost if it isn't played by the GW19 deadline.
+    """
+    fpl = _get_fpl_data()
+    known = []
+    for c in (fpl.get("chips") or []):
+        name = (c.get("name") or "").strip().lower()
+        if name and name not in known:
+            known.append(name)
+    if not known:
+        known = list(FALLBACK_CHIPS)
+
+    half = 1 if current_gw <= FIRST_HALF_DEADLINE_GW else 2
+
+    used: dict = {}
+    for c in (chips_played or []):
+        name = (c.get("name") or "").strip().lower()
+        gw   = c.get("event") or 0
+        used.setdefault(name, []).append({
+            "gameweek": gw,
+            "half": 1 if gw <= FIRST_HALF_DEADLINE_GW else 2,
+        })
+
+    state = {}
+    for name in known:
+        plays = used.get(name, [])
+        state[name] = {
+            "key":        name,
+            "chip":       CHIP_LABELS.get(name, name.replace("_", " ").title()),
+            "played":     plays,
+            "available":  not any(p["half"] == half for p in plays),
+            "half":       half,
+            "expires_gw": FIRST_HALF_DEADLINE_GW if half == 1 else None,
+            "gws_left":   max(0, FIRST_HALF_DEADLINE_GW - current_gw) if half == 1 else None,
+        }
+    return state
+
+
+def _manager_profile(entry: dict, history: dict) -> dict:
+    """How this manager plays, from their own season history. This is the
+    part that should change what we recommend: someone taking a hit every
+    week and someone sitting on free transfers do not need the same advice,
+    and a manager sliding down the ranks needs differentials while one
+    climbing needs to protect what they have."""
+    rows = (history or {}).get("current") or []
+    if not rows:
+        return {}
+
+    gws       = len(rows)
+    hits      = sum(r.get("event_transfers_cost") or 0 for r in rows)
+    transfers = sum(r.get("event_transfers") or 0 for r in rows)
+    bench_pts = sum(r.get("points_on_bench") or 0 for r in rows)
+    ranks     = [r.get("overall_rank") for r in rows if r.get("overall_rank")]
+
+    trend = None
+    if len(ranks) >= 2:
+        window = ranks[-5:]
+        delta  = window[0] - window[-1]          # positive means rank improving
+        if abs(delta) < max(1, int(window[0] * 0.02)):
+            trend = "steady"
+        else:
+            trend = "climbing" if delta > 0 else "sliding"
+
+    best  = max(rows, key=lambda r: r.get("points") or 0)
+    worst = min(rows, key=lambda r: r.get("points") or 0)
+    tpg   = (transfers / gws) if gws else 0
+
+    return {
+        "gameweeks_played":    gws,
+        "overall_points":      entry.get("summary_overall_points"),
+        "overall_rank":        entry.get("summary_overall_rank"),
+        "last_gw_points":      entry.get("summary_event_points"),
+        "rank_trend":          trend,
+        "transfers_made":      transfers,
+        "transfers_per_gw":    round(tpg, 2),
+        "total_hits_cost":     hits,
+        "points_on_bench":     bench_pts,
+        "bench_points_per_gw": round(bench_pts / gws, 2) if gws else 0,
+        "best_gameweek":       {"gameweek": best.get("event"),  "points": best.get("points")},
+        "worst_gameweek":      {"gameweek": worst.get("event"), "points": worst.get("points")},
+        "aggression":          ("high" if tpg > 1.6 else "low" if tpg < 0.8 else "balanced"),
+        "past_seasons":        (history or {}).get("past") or [],
+    }
+
+
+def _get_entry(entry_id: int) -> dict:
+    """Everything we can learn about a manager from their team ID alone."""
+    cache_key = f"fpl_entry_v1__{entry_id}"
+    cached    = cache_read(cache_key)
+    if cached and cache_age(cached) < ENTRY_TTL:
+        out = dict(cached); out["cached"] = True
+        return out
+
+    entry = _fpl_json(f"entry/{entry_id}/")
+    if not entry:
+        raise HTTPException(
+            404,
+            f"No FPL team found for ID {entry_id}. Open the Points tab on the "
+            "FPL site and copy the number after /entry/ in the address bar."
+        )
+
+    history = _fpl_json(f"entry/{entry_id}/history/") or {}
+
+    # Walk back from the last locked gameweek until we find one with picks.
+    gw, picks_doc, attempts = _last_locked_gw(), None, 0
+    while gw > 0 and picks_doc is None and attempts < 6:
+        picks_doc = _fpl_json(f"entry/{entry_id}/event/{gw}/picks/")
+        if picks_doc is None:
+            gw -= 1
+        attempts += 1
+    if picks_doc is None:
+        raise HTTPException(404, f"FPL team {entry_id} has no locked squad yet this season.")
+
+    picks      = picks_doc.get("picks") or []
+    eh         = picks_doc.get("entry_history") or {}
+    current_gw = _get_fpl_data().get("current_event", 0)
+    chips_played = history.get("chips") or []
+
+    bank  = (eh.get("bank")  if eh.get("bank")  is not None else entry.get("last_deadline_bank")  or 0)
+    value = (eh.get("value") if eh.get("value") is not None else entry.get("last_deadline_value") or 0)
+
+    result = {
+        "entry_id":         entry_id,
+        "team_name":        entry.get("name"),
+        "manager_name":     " ".join(x for x in [entry.get("player_first_name"),
+                                                 entry.get("player_last_name")] if x) or None,
+        "squad_gameweek":   gw,
+        "current_gameweek": current_gw,
+        "squad_is_stale":   gw < current_gw,
+        "player_ids":       [p["element"] for p in picks],
+        "captain_id":       next((p["element"] for p in picks if p.get("is_captain")), None),
+        "vice_captain_id":  next((p["element"] for p in picks if p.get("is_vice_captain")), None),
+        "active_chip":      picks_doc.get("active_chip"),
+        "bank":             round(bank / 10, 1),
+        "squad_value":      round(value / 10, 1),
+        "chips_played":     chips_played,
+        "chips_state":      _chips_state(chips_played, current_gw),
+        "profile":          _manager_profile(entry, history),
+        "cached": False, "_cached_at": time.time(),
+    }
+    cache_write(cache_key, result)
+    return result
+
+
+
 def _rank_chips(squad: list[dict], starting: list[dict], bench: list[dict],
-                 captain: dict, current_gw: int) -> list[dict]:
+                 captain: dict, current_gw: int,
+                 chips_state: dict | None = None) -> list[dict]:
     """Rank Wildcard / Free Hit / Bench Boost / Triple Captain by how
     attractive each looks for THIS gameweek, using signals we can
     actually derive from current squad + fixture data.
@@ -59,10 +274,12 @@ def _rank_chips(squad: list[dict], starting: list[dict], bench: list[dict],
     One of each must be used before the Gameweek 19 deadline or that
     half's copy is lost — it does not roll into the second half.
 
-    Known limitation: this does not know which chips the user has
-    already used (the endpoint is stateless — that would need to be
-    passed in as an input for fully personalised advice), and it does
-    not detect true double/blank gameweeks, which need FPL's per-team
+    When chips_state is passed in (which it is whenever the caller
+    supplied an FPL team ID), chips already played this half are marked
+    unavailable and dropped to the bottom, and a chip about to expire
+    gets an urgency bump. Without it the ranking is generic.
+
+    Remaining limitation: this does not detect true double/blank gameweeks, which need FPL's per-team
     fixture COUNT for a given gameweek, a different endpoint
     (/api/fixtures/?event=X) not currently fetched here. Bench Boost
     and Free Hit scoring below are fixture-difficulty proxies, not
@@ -150,9 +367,31 @@ def _rank_chips(squad: list[dict], starting: list[dict], bench: list[dict],
             "suggested_squad_endpoint": "/api/fpl/wildcard-squad",
         },
     ]
+    # Personalise against what the manager actually has left.
+    if chips_state:
+        by_label = {v["chip"]: v for v in chips_state.values()}
+        for c in chips:
+            st = by_label.get(c["chip"])
+            if not st:
+                continue
+            c["available"] = st["available"]
+            c["played"]    = st["played"]
+            if not st["available"]:
+                when = ", ".join(f"GW{p['gameweek']}" for p in st["played"]
+                                 if p["half"] == st["half"])
+                c["score"]  = -1
+                c["reason"] = (f"Already played this half ({when}). The next copy "
+                               f"unlocks in the second half of the season.")
+                c["action"] = "Not available right now."
+            elif st.get("gws_left") is not None and st["gws_left"] <= 4:
+                c["score"]   = min(10, c["score"] + 2)
+                c["reason"] += (f" Only {st['gws_left']} gameweek(s) left before this "
+                                f"one expires at GW{FIRST_HALF_DEADLINE_GW}.")
+
     chips.sort(key=lambda c: c["score"], reverse=True)
     for c in chips:
         c["half"] = half
+        c.setdefault("available", True)
     return chips
 
 def _normalize_str(s: str) -> str:
@@ -267,7 +506,7 @@ POS_LABEL = {1: "Goalkeeper", 2: "Defender", 3: "Midfielder", 4: "Forward"}
 # ── FPL data fetch ────────────────────────────────────────────────────────────
 
 def _get_fpl_data() -> dict:
-    cache_key = "fpl_bootstrap_v1"
+    cache_key = "fpl_bootstrap_v2"
     cached    = cache_read(cache_key)
     if cached and cache_age(cached) < FPL_TTL:
         return cached
@@ -294,10 +533,27 @@ def _get_fpl_data() -> dict:
             current_event = ev.get("id", 0)
             break
 
+    # Events are kept in full (id / deadline / finished flags) so the
+    # entry helpers can work out the newest gameweek whose picks are
+    # public, and chips is kept so chip entitlement comes from FPL
+    # rather than a hardcoded list that goes stale when they change the
+    # rules again.
+    events = [
+        {
+            "id":            e.get("id"),
+            "deadline_time": e.get("deadline_time"),
+            "is_current":    e.get("is_current"),
+            "finished":      e.get("finished"),
+        }
+        for e in data.get("events", [])
+    ]
+
     result = {
         "players":       players,
         "teams":         teams,
         "current_event": current_event,
+        "events":        events,
+        "chips":         data.get("chips", []),
         "_cached_at":    time.time(),
     }
     cache_write(cache_key, result)
@@ -1442,24 +1698,53 @@ def freehit_squad(
     return response
 
 
+@router.get("/fpl/manager")
+def manager_lookup(
+    entry_id: int = Query(..., description="FPL team ID, the number after /entry/ "
+                                           "in the address bar on the FPL Points tab", ge=1),
+):
+    """Everything we can read from a team ID: squad, bank, value, chips
+    played, chips remaining, and a profile of how this manager plays."""
+    return _get_entry(entry_id)
+
+
 @router.get("/fpl/squad")
 def squad_analysis(
-    player_ids: str = Query(..., description="15 comma-separated FPL player IDs"),
-    bank:       float = Query(0.0, description="Money left in the bank, £m", ge=0, le=50),
+    entry_id:   int | None = Query(None, description="FPL team ID. Supply this instead of "
+                                                     "player_ids and bank and we pull the squad, "
+                                                     "the bank and the chips automatically.", ge=1),
+    player_ids: str | None = Query(None, description="15 comma-separated FPL player IDs. "
+                                                     "Only needed if entry_id is not given."),
+    bank:       float = Query(0.0, description="Money left in the bank, £m. Ignored when "
+                                               "entry_id is given.", ge=0, le=50),
     refresh:    bool = Query(False, description="Skip cache and recompute fresh"),
 ):
-    try:
-        ids = [int(x.strip()) for x in player_ids.split(",") if x.strip()]
-    except ValueError:
-        raise HTTPException(400, "player_ids must be a comma-separated list of integers.")
-    if len(ids) != 15 or len(set(ids)) != 15:
-        raise HTTPException(400, f"Expected exactly 15 unique player IDs, got {len(set(ids))}.")
+    entry_meta = None
+
+    if entry_id:
+        entry_meta = _get_entry(entry_id)
+        ids  = list(entry_meta["player_ids"])
+        bank = entry_meta["bank"]
+        if len(ids) != 15 or len(set(ids)) != 15:
+            raise HTTPException(502, f"FPL returned {len(set(ids))} unique picks for team "
+                                     f"{entry_id}, expected 15.")
+    else:
+        if not player_ids:
+            raise HTTPException(400, "Supply either entry_id (your FPL team ID) or "
+                                     "player_ids (15 comma-separated FPL player IDs).")
+        try:
+            ids = [int(x.strip()) for x in player_ids.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(400, "player_ids must be a comma-separated list of integers.")
+        if len(ids) != 15 or len(set(ids)) != 15:
+            raise HTTPException(400, f"Expected exactly 15 unique player IDs, got {len(set(ids))}.")
 
     # v2: bumped from v1 because the response shape changed (chip_advice
     # replaced chip_suggestion, transfer_suggestions is now capped at 3) —
     # a v1-keyed cache entry would still have the old shape and silently
     # look like the fix didn't work.
-    cache_key = f"fpl_squad_v2__{'_'.join(map(str, sorted(ids)))}__{bank}"
+    cache_key = (f"fpl_squad_v3__entry_{entry_id}" if entry_id
+                 else f"fpl_squad_v3__{'_'.join(map(str, sorted(ids)))}__{bank}")
     cached    = cache_read(cache_key)
     if not refresh and cached and cache_age(cached) < SQUAD_TTL:
         cached["cached"] = True
@@ -1576,7 +1861,8 @@ def squad_analysis(
     # populated by _get_fpl_data() (see fix above). Ranked across all
     # four chip types with reasoning, not a single flat guess.
     current_gw  = fpl.get("current_event", 0)
-    chip_advice = _rank_chips(squad, starting, bench, captain, current_gw)
+    chip_advice = _rank_chips(squad, starting, bench, captain, current_gw,
+                              chips_state=(entry_meta or {}).get("chips_state"))
 
     result = {
         "formation": formation,
@@ -1590,6 +1876,17 @@ def squad_analysis(
         "share_text": cap_text,
         "current_gameweek": current_gw,
         "chip_advice": chip_advice,
+        "manager": ({
+            "entry_id":       entry_meta["entry_id"],
+            "team_name":      entry_meta["team_name"],
+            "manager_name":   entry_meta["manager_name"],
+            "squad_gameweek": entry_meta["squad_gameweek"],
+            "squad_is_stale": entry_meta["squad_is_stale"],
+            "active_chip":    entry_meta["active_chip"],
+            "chips_played":   entry_meta["chips_played"],
+            "chips_state":    entry_meta["chips_state"],
+            "profile":        entry_meta["profile"],
+        } if entry_meta else None),
         "cached": False, "_cached_at": time.time(),
     }
     cache_write(cache_key, result)
